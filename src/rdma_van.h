@@ -274,12 +274,15 @@ struct BufferContext {
   size_t data_len[kMaxDataFields];
 };
 
+typedef std::unique_ptr<struct ibv_mr, std::function<void(struct ibv_mr *)>>
+    MRPtr;
+
 struct MessageBuffer {
   size_t inline_len;
   char *inline_buf;
   WRContext *reserved_context;
   std::vector<SArray<char>> data;
-  std::vector<std::pair<struct ibv_mr *, size_t>> mrs;
+  std::vector<std::pair<MRPtr, size_t>> mrs;
 };
 
 struct RequestContext {
@@ -767,7 +770,9 @@ class RDMAVan : public Van {
             allocated_mr_[p] = ibv_reg_mr(pd_, p, sa.size(), 0);
           }
           CHECK(allocated_mr_[p]) << "Invalid memory region";
-          msg_buf->mrs.push_back({allocated_mr_[p], sa.size()});
+          MRPtr ptr(allocated_mr_[p], [](struct ibv_mr *mr) {});
+          CHECK(ptr.get()) << strerror(errno);
+          msg_buf->mrs.push_back(std::make_pair(std::move(ptr), sa.size()));
         }
       }
     }
