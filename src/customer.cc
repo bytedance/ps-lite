@@ -255,11 +255,11 @@ void Customer::ProcessResponse(int thread_id) {
 }
 
 std::string Customer::GetTimestampNow() {
-  std::chrono::nanoseconds ms =
-      std::chrono::duration_cast<std::chrono::nanoseconds >(std::chrono::system_clock::now().time_since_epoch());
+  std::chrono::microseconds us =
+      std::chrono::duration_cast<std::chrono::microseconds >(std::chrono::system_clock::now().time_since_epoch());
   std::stringstream temp_stream;
   std::string ts_string;
-  temp_stream << ms.count();
+  temp_stream << us.count();
   temp_stream >> ts_string;
   return ts_string;
 }
