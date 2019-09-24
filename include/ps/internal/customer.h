@@ -24,7 +24,7 @@ struct Profile {
   bool is_push;
   std::string ts;
   bool is_begin;
-}
+};
 
 /**
  * \brief The object for communication.
@@ -106,7 +106,7 @@ class Customer {
   uint64_t GetKeyFromMsg(const Message& msg);
   void ProcessResponse(int thread_id);
   std::string GetTimestampNow();
-  
+
  private:
   /**
    * \brief the thread function
