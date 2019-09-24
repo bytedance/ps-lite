@@ -187,6 +187,20 @@ void Customer::ProcessPushRequest(int thread_id) {
   }
 }
 
+void Customer::ProcessProfileData() {
+  LOG(INFO) << "profile thread is inited";
+  while (true) {
+    Profile pdata;
+    pdata_queue_.WaitAndPop(&pdata);
+    LOG(INFO) << "key=" << pdata.key
+              << ", sender=" << pdata.sender
+              << ", " << pdata.is_push?"push":"pull"
+              << ", ts=" << pdata.ts
+              << ", " << pdata.is_begin?"begin":"end";
+  }
+  LOG(INFO) << "profile thread ended";
+}
+
 void Customer::ProcessResponse(int thread_id) {
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -246,8 +260,10 @@ void Customer::Receiving() {
   // profiling
   val = Environment::Get()->find("BYTEPS_SERVER_ENABLE_PROFILE");
   enable_profile_ = val ? atoi(val) : false;
+  std::thread* profile_thread;
   if (enable_profile_ && is_server) {
     LOG(INFO) << "Enable server profiling";
+    profile_thread = new std::thread(&Customer::ProcessProfileData, this);
   }
 
   if (is_server && is_server_multi_pull_enabled){ // server multi-thread
@@ -347,6 +363,7 @@ void Customer::Receiving() {
     // wait until the threads finish
     for (auto t : push_thread) t->join();
     for (auto t : pull_thread) t->join();
+    if (profile_thread) profile_thread->join();
 
   } // server multi-thread
 

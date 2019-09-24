@@ -102,6 +102,7 @@ class Customer {
 
   void ProcessPullRequest(int worker_id);
   void ProcessPushRequest(int thread_id);
+  void ProcessProfileData();
   bool IsValidPushpull(const Message& msg);
   uint64_t GetKeyFromMsg(const Message& msg);
   void ProcessResponse(int thread_id);
