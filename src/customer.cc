@@ -194,9 +194,9 @@ void Customer::ProcessPushRequest(int thread_id) {
 void Customer::ProcessProfileData() {
   LOG(INFO) << "profile thread is inited";
   const char *val;
-  val = CHECK_NOTNULL(Environment::Get()->find("BYTEPS_SERVER_PROFILE_ALL_KEY"));
+  val = Environment::Get()->find("BYTEPS_SERVER_PROFILE_ALL_KEY");
   bool profile_all = val ? atoi(val) : false;
-  val = CHECK_NOTNULL(Environment::Get()->find("BYTEPS_SERVER_KEY_TO_PROFILE"));
+  val = Environment::Get()->find("BYTEPS_SERVER_KEY_TO_PROFILE");
   uint64_t key_to_profile = val ? atoi(val) : 0;
   while (true) {
     Profile pdata;
