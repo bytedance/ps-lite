@@ -193,11 +193,14 @@ void Customer::ProcessPushRequest(int thread_id) {
 
 void Customer::ProcessProfileData() {
   LOG(INFO) << "profile thread is inited";
+  bool profile_all = true; // default: profile all keys
+  uint64_t key_to_profile;
   const char *val;
-  val = Environment::Get()->find("BYTEPS_SERVER_PROFILE_ALL_KEY");
-  bool profile_all = val ? atoi(val) : false;
   val = Environment::Get()->find("BYTEPS_SERVER_KEY_TO_PROFILE");
-  uint64_t key_to_profile = val ? atoi(val) : 0;
+  if (val) {
+    profile_all = false;
+    key_to_profile = atoi(val);
+  }
   while (true) {
     Profile pdata;
     pdata_queue_.WaitAndPop(&pdata);
