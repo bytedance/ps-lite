@@ -197,7 +197,7 @@ void Customer::ProcessProfileData() {
   val = CHECK_NOTNULL(Environment::Get()->find("BYTEPS_SERVER_PROFILE_ALL_KEY"));
   bool profile_all = val ? atoi(val) : false;
   val = CHECK_NOTNULL(Environment::Get()->find("BYTEPS_SERVER_KEY_TO_PROFILE"));
-  uint64_t key_to_profile = atoi(val) : 0;
+  uint64_t key_to_profile = val ? atoi(val) : 0;
   while (true) {
     Profile pdata;
     pdata_queue_.WaitAndPop(&pdata);
