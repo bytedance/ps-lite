@@ -194,9 +194,9 @@ void Customer::ProcessProfileData() {
     pdata_queue_.WaitAndPop(&pdata);
     LOG(INFO) << "key=" << pdata.key
               << ", sender=" << pdata.sender
-              << ", " << pdata.is_push?"push":"pull"
+              << ", " << (pdata.is_push?"push":"pull")
               << ", ts=" << pdata.ts
-              << ", " << pdata.is_begin?"begin":"end";
+              << ", " << (pdata.is_begin?"begin":"end");
   }
   LOG(INFO) << "profile thread ended";
 }
