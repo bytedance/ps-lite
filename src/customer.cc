@@ -124,11 +124,11 @@ void Customer::ProcessPullRequest(int worker_id) {
           pull_collected_[key].clear();
         }
         recv_handle_(msg);
+        it = pull_consumer.erase(it);
         if (enable_profile_) {
           Profile pdata = {key, msg.meta.sender, false, GetTimestampNow(), false};
           pdata_queue_.Push(pdata);
         }
-        it = pull_consumer.erase(it);
         break;
       } else {
         ++it;
