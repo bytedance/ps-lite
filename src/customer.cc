@@ -206,24 +206,17 @@ void Customer::ProcessProfileData() {
   val = Environment::Get()->find("BYTEPS_SERVER_PROFILE_OUTPUT_PATH");
   fout_.open((val ? std::string(val) : "server_profile.json"), std::fstream::out);
   fout_ << "{\n";
-  fout_ << "   \"traceEvents\": [\n";
+  fout_ << "\t\"traceEvents\": [\n";
   while (true) {
     Profile pdata;
     pdata_queue_.WaitAndPop(&pdata);
     if (profile_all || key_to_profile==pdata.key) {
-      fout_ << "{\"name\": " << "\"" <<(pdata.is_push?"push":"pull") << "-" << pdata.sender << "\"" << ", "
-            << "\"ph\": " << "\"" << (pdata.is_begin?"B":"E") << "\"" << ","
-            << "\"pid\": " << pdata.key << ","
-            << "\"tid\": " << pdata.key << ","
+      fout_ << "\t\t" << "{\"name\": " << "\"" <<(pdata.is_push?"push":"pull") << "-" << pdata.sender << "\"" << ", "
+            << "\"ph\": " << "\"" << (pdata.is_begin?"B":"E") << "\"" << ", "
+            << "\"pid\": " << pdata.key << ", "
+            << "\"tid\": " << pdata.key << ", "
             << "\"ts\": " << pdata.ts
-            << "},";
-            
-      LOG(INFO) << "{\"name\": " << "\"" <<(pdata.is_push?"push":"pull") << "-" << pdata.sender << "\"" << ", "
-            << "\"ph\": " << "\"" << (pdata.is_begin?"B":"E") << "\"" << ","
-            << "\"pid\": " << pdata.key << ","
-            << "\"tid\": " << pdata.key << ","
-            << "\"ts\": " << pdata.ts
-            << "},";
+            << "},\n";
     }
     fout_.flush();
   }
