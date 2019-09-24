@@ -124,8 +124,10 @@ void Customer::ProcessPullRequest(int worker_id) {
           pull_collected_[key].clear();
         }
         recv_handle_(msg);
-        Profile pdata = {key, msg.meta.sender, true, GetTimestampNow(), false};
-        pdata_queue_.Push(pdata);
+        if (enable_profile_) {
+          Profile pdata = {key, msg.meta.sender, true, GetTimestampNow(), false};
+          pdata_queue_.Push(pdata);
+        }
         it = pull_consumer.erase(it);
         break;
       } else {
@@ -166,8 +168,10 @@ void Customer::ProcessPushRequest(int thread_id) {
       CHECK(msg.meta.push);
       uint64_t key = GetKeyFromMsg(msg);
       recv_handle_(msg);
-      Profile pdata = {key, msg.meta.sender, false, GetTimestampNow(), false};
-      pdata_queue_.Push(pdata);
+      if (enable_profile_) {
+        Profile pdata = {key, msg.meta.sender, false, GetTimestampNow(), false};
+        pdata_queue_.Push(pdata);
+      }
 
       it = push_consumer.erase(it);
 
@@ -347,13 +351,17 @@ void Customer::Receiving() {
 
       if (recv.meta.push) { // push: same key goes to same thread
         std::lock_guard<std::mutex> lock(mu_);
-        Profile pdata = {key, recv.meta.sender, true, GetTimestampNow(), true};
-        pdata_queue_.Push(pdata);
+        if (enable_profile_) {
+          Profile pdata = {key, recv.meta.sender, true, GetTimestampNow(), true};
+          pdata_queue_.Push(pdata);
+        }
         buffered_push_[(key/num_server) % server_push_nthread].push_back(recv);
       } else { // pull
         std::lock_guard<std::mutex> lock(mu_);
-        Profile pdata = {key, recv.meta.sender, false, GetTimestampNow(), true};
-        pdata_queue_.Push(pdata);
+        if (enable_profile_) {
+          Profile pdata = {key, recv.meta.sender, false, GetTimestampNow(), true};
+          pdata_queue_.Push(pdata);
+        }
         int worker_id = (recv.meta.sender - 9) / 2; // worker id: 9, 11, 13 ...
         buffered_pull_[worker_id].push_back(recv);
       }
