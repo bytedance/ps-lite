@@ -193,14 +193,21 @@ void Customer::ProcessPushRequest(int thread_id) {
 
 void Customer::ProcessProfileData() {
   LOG(INFO) << "profile thread is inited";
+  const char *val;
+  val = CHECK_NOTNULL(Environment::Get()->find("BYTEPS_SERVER_PROFILE_ALL_KEY"));
+  bool profile_all = val ? atoi(val) : false;
+  val = CHECK_NOTNULL(Environment::Get()->find("BYTEPS_SERVER_KEY_TO_PROFILE"));
+  uint64_t key_to_profile = atoi(val) : 0;
   while (true) {
     Profile pdata;
     pdata_queue_.WaitAndPop(&pdata);
-    LOG(INFO) << "key=" << pdata.key
-              << ", sender=" << pdata.sender
-              << ", " << (pdata.is_push?"push":"pull")
-              << ", ts=" << pdata.ts
-              << ", " << (pdata.is_begin?"begin":"end");
+    if (profile_all || key_to_profile==pdata.key) {
+      LOG(INFO) << "key=" << pdata.key
+                << ", sender=" << pdata.sender
+                << ", " << (pdata.is_push?"push":"pull")
+                << ", ts=" << pdata.ts
+                << ", " << (pdata.is_begin?"begin":"end");
+    }
   }
   LOG(INFO) << "profile thread ended";
 }
@@ -258,7 +265,6 @@ void Customer::Receiving() {
   bool enable_async = val ? atoi(val) : false;
   if (is_server && enable_async) {
     is_server_multi_pull_enabled = false;
-    LOG(INFO) << "Multi-threading has been disabled for asynchronous training";
   }
 
   // profiling
