@@ -9,6 +9,7 @@
 #include <set>
 #include <list>
 #include <fstream>
+#include <chrono>
 namespace ps {
 const int Node::kEmpty = std::numeric_limits<int>::max();
 const int Meta::kEmpty = std::numeric_limits<int>::max();
@@ -22,6 +23,7 @@ std::unordered_map<uint64_t, std::set<int> > pull_collected_;
 std::vector<std::list<Message> > worker_buffer_;
 
 std::atomic<int> thread_barrier_{0};
+bool enable_profile_ = false;
 
 Customer::Customer(int app_id, int customer_id, const Customer::RecvHandle& recv_handle)
     : app_id_(app_id), customer_id_(customer_id), recv_handle_(recv_handle) {
@@ -122,6 +124,8 @@ void Customer::ProcessPullRequest(int worker_id) {
           pull_collected_[key].clear();
         }
         recv_handle_(msg);
+        Profile pdata = {key, recv.meta.sender, true, GetTimestampNow(), false};
+        pdata_queue_.Push(pdata);
         it = pull_consumer.erase(it);
         break;
       } else {
@@ -162,6 +166,8 @@ void Customer::ProcessPushRequest(int thread_id) {
       CHECK(msg.meta.push);
       uint64_t key = GetKeyFromMsg(msg);
       recv_handle_(msg);
+      Profile pdata = {key, recv.meta.sender, false, GetTimestampNow(), false};
+      pdata_queue_.Push(pdata);
 
       it = push_consumer.erase(it);
 
@@ -207,6 +213,16 @@ void Customer::ProcessResponse(int thread_id) {
   }
 }
 
+std::string Customer::GetTimestampNow() {
+  std::chrono::nanoseconds ms =
+      std::chrono::duration_cast<std::chrono::nanoseconds >(std::chrono::system_clock::now().time_since_epoch());
+  std::stringstream temp_stream;
+  std::string ts_string;
+  temp_stream << ms.count();
+  temp_stream >> ts_string;
+  return ts_string;
+}
+
 void Customer::Receiving() {
   const char *val;
   val = CHECK_NOTNULL(Environment::Get()->find("DMLC_ROLE"));
@@ -227,8 +243,15 @@ void Customer::Receiving() {
     LOG(INFO) << "Multi-threading has been disabled for asynchronous training";
   }
 
+  // profiling
+  val = Environment::Get()->find("BYTEPS_SERVER_ENABLE_PROFILE");
+  enable_profile_ = val ? atoi(val) : false;
+  if (enable_profile_ && is_server) {
+    LOG(INFO) << "Enable server profiling";
+  }
+
   if (is_server && is_server_multi_pull_enabled){ // server multi-thread
-    LOG(INFO) << "Use seperate thread to process pull requests from each worker.";
+    LOG(INFO) << "Use separate thread to process pull requests from each worker.";
 
     std::vector<std::thread *> push_thread;
     for (int i = 0; i < server_push_nthread; ++i) {
@@ -308,9 +331,13 @@ void Customer::Receiving() {
 
       if (recv.meta.push) { // push: same key goes to same thread
         std::lock_guard<std::mutex> lock(mu_);
-        buffered_push_[(key/num_server)%server_push_nthread].push_back(recv);
+        Profile pdata = {key, recv.meta.sender, true, GetTimestampNow(), true};
+        pdata_queue_.Push(pdata);
+        buffered_push_[(key/num_server) % server_push_nthread].push_back(recv);
       } else { // pull
         std::lock_guard<std::mutex> lock(mu_);
+        Profile pdata = {key, recv.meta.sender, false, GetTimestampNow(), true};
+        pdata_queue_.Push(pdata);
         int worker_id = (recv.meta.sender - 9) / 2; // worker id: 9, 11, 13 ...
         buffered_pull_[worker_id].push_back(recv);
       }
