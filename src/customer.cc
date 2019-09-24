@@ -125,7 +125,7 @@ void Customer::ProcessPullRequest(int worker_id) {
         }
         recv_handle_(msg);
         if (enable_profile_) {
-          Profile pdata = {key, msg.meta.sender, true, GetTimestampNow(), false};
+          Profile pdata = {key, msg.meta.sender, false, GetTimestampNow(), false};
           pdata_queue_.Push(pdata);
         }
         it = pull_consumer.erase(it);
@@ -169,7 +169,7 @@ void Customer::ProcessPushRequest(int thread_id) {
       uint64_t key = GetKeyFromMsg(msg);
       recv_handle_(msg);
       if (enable_profile_) {
-        Profile pdata = {key, msg.meta.sender, false, GetTimestampNow(), false};
+        Profile pdata = {key, msg.meta.sender, true, GetTimestampNow(), false};
         pdata_queue_.Push(pdata);
       }
 
