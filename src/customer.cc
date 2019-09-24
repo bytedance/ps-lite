@@ -207,18 +207,23 @@ void Customer::ProcessProfileData() {
   fout_.open((val ? std::string(val) : "server_profile.json"), std::fstream::out);
   fout_ << "{\n";
   fout_ << "\t\"traceEvents\": [\n";
+  bool is_init = true;
   while (true) {
     Profile pdata;
     pdata_queue_.WaitAndPop(&pdata);
     if (profile_all || key_to_profile==pdata.key) {
+      if (!is_init) {
+        fout_ << ",\n";
+      } else {
+        is_init = false;
+      }
       fout_ << "\t\t" << "{\"name\": " << "\"" <<(pdata.is_push?"push":"pull") << "-" << pdata.sender << "\"" << ", "
             << "\"ph\": " << "\"" << (pdata.is_begin?"B":"E") << "\"" << ", "
             << "\"pid\": " << pdata.key << ", "
             << "\"tid\": " << pdata.key << ", "
             << "\"ts\": " << pdata.ts
-            << "},\n";
+            << "}";
     }
-    fout_.flush();
   }
   fout_ << "]\n";
   fout_ << "}";
