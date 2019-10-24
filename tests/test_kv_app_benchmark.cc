@@ -143,6 +143,8 @@ void RunWorker(int argc, char *argv[]) {
         auto end = std::chrono::high_resolution_clock::now();
         auto val = Environment::Get()->find("THRESHOLD");
         unsigned int threshold = val ? atoi(val) : 10;
+        val = Environment::Get()->find("LOG_DURATION");
+        unsigned int log_duration = val ? atoi(val) : 500;
         int cnt = 0;
         while (1) {
           for (int server = 0; server < num_servers; server++) {
@@ -161,9 +163,9 @@ void RunWorker(int argc, char *argv[]) {
             }
             timestamp_list.clear();
             cnt++;
-            if (cnt % 100 == 0) {
+            if (cnt % log_duration == 0) {
               end = std::chrono::high_resolution_clock::now();
-              LL << "Benchmark throughput: " 
+              LL << "Application goodput: " 
                  << 8.0 * len * sizeof(float) * num_servers * cnt * threshold / (end - start).count() 
                  << " Gbps";
               cnt = 0;
