@@ -19,6 +19,7 @@ void EmptyHandler(const KVMeta &req_meta, const KVPairs<Val> &req_data, KVServer
     CHECK_EQ(req_data.vals.size(), (size_t)req_data.lens[0]);
 
     if (mem_map.find(key) == mem_map.end()) {
+      PS_VLOG(1) << "key " << key << " from worker-" << req_meta.sender;
       size_t len = (size_t) req_data.vals.size();
       mem_map[key].keys.push_back(key);
       mem_map[key].vals.CopyFrom(req_data.vals);
