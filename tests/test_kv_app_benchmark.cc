@@ -62,7 +62,7 @@ void RunWorker(int argc, char *argv[]) {
   // init
   int len = atoi(argv[1]);
   int repeat = atoi(argv[2]);
-  MODE mode = (argc > 3) ? static_cast<MODE>(atoi(argv[3])) : PUSH_THEN_PULL;
+  MODE mode = (argc > 3) ? static_cast<MODE>(atoi(argv[3])) : PUSH_PULL_MIX_ENDLESS;
 
   std::vector<SArray<float> > server_vals;
   for (int server = 0; server < num_servers; server++) {
@@ -138,6 +138,11 @@ void RunWorker(int argc, char *argv[]) {
     case PUSH_PULL_MIX_ENDLESS: {
         LOG(INFO) << "PUSH_PULL_MIX_ENDLESS mode, should exit by Ctrl+C";
         std::vector<int> timestamp_list;
+        auto start = std::chrono::high_resolution_clock::now();
+        auto end = std::chrono::high_resolution_clock::now();
+        auto val = Environment::Get()->find("THRESHOLD");
+        unsigned int threshold = val ? atoi(val) : 10;
+        int cnt = 0;
         while (1) {
           for (int server = 0; server < num_servers; server++) {
             int key = server;
@@ -148,11 +153,20 @@ void RunWorker(int argc, char *argv[]) {
 
             timestamp_list.push_back(kv.ZPush(keys, vals, lens));
             timestamp_list.push_back(kv.ZPull(keys, &vals, &lens));
-            if (timestamp_list.size()==20) { // flow control
-              for (auto& ts : timestamp_list) {
-                kv.Wait(ts);
-              }
-              timestamp_list.clear();
+          }
+          if (timestamp_list.size()/2/num_servers >= threshold) { // flow control
+            for (auto& ts : timestamp_list) {
+              kv.Wait(ts);
+            }
+            timestamp_list.clear();
+            cnt++;
+            if (cnt % 100 == 0) {
+              end = std::chrono::high_resolution_clock::now();
+              LL << "Benchmark throughput: " 
+                 << 8.0 * len * sizeof(float) * num_servers * cnt * threshold / (end - start).count() 
+                 << " Gbps";
+              cnt = 0;
+              start = std::chrono::high_resolution_clock::now();
             }
           }
         }
