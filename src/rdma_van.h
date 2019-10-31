@@ -1330,8 +1330,8 @@ class RDMAVan : public Van {
     endpoint->cv.notify_all();
   }
 
-  AddressPool<BufferContext> addr_pool_;
   std::unique_ptr<SimpleMempool> mempool_;
+  AddressPool<BufferContext> addr_pool_;
 
   struct rdma_cm_id *listener_ = nullptr;
   std::atomic<bool> should_stop_;
