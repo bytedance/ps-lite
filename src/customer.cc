@@ -1,6 +1,19 @@
-/**
- *  Copyright (c) 2015 by Contributors
- */
+// Copyright 2019 Bytedance Inc. or its affiliates. All Rights Reserved.
+// Copyright (c) 2015 by ps-lite Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// =============================================================================
+
 #include "ps/internal/customer.h"
 #include "ps/internal/postoffice.h"
 #include "ps/internal/threadsafe_queue.h"
@@ -10,18 +23,19 @@
 #include <list>
 #include <fstream>
 #include <chrono>
+
 namespace ps {
 const int Node::kEmpty = std::numeric_limits<int>::max();
 const int Meta::kEmpty = std::numeric_limits<int>::max();
 size_t num_worker, num_server;
 std::mutex mu_;
-std::mutex key_mu_;
+std::vector<std::mutex> push_mu_;
+std::vector<std::mutex> pull_mu_;
 std::vector<std::list<Message> > buffered_push_;
 std::vector<std::list<Message> > buffered_pull_;
-std::unordered_map<uint64_t, std::atomic<bool> > is_push_finished_;
-std::unordered_map<uint64_t, std::set<int> > pull_collected_;
-std::vector<std::list<Message> > worker_buffer_;
 
+std::mutex map_mu_; // try to protect "is_push_finished_" to avoid race
+std::unordered_map<uint64_t, std::atomic<bool> > is_push_finished_;
 std::atomic<int> thread_barrier_{0};
 bool enable_profile_ = false;
 
@@ -77,7 +91,7 @@ bool Customer::IsValidPushpull(const Message &msg) {
   return true;
 }
 
-uint64_t Customer::GetKeyFromMsg(const Message &msg) { // should check if this is valid push/pull
+uint64_t Customer::GetKeyFromMsg(const Message &msg) { 
   CHECK(IsValidPushpull(msg)) << "Perform key derivation on an invalid message";
   CHECK_GT(msg.data.size(), 0) << "Invalid data message: msg.data.size() is 0";
   uint64_t key = 0;
@@ -89,20 +103,41 @@ uint64_t Customer::GetKeyFromMsg(const Message &msg) { // should check if this i
   return key;
 }
 
-void Customer::ProcessPullRequest(int worker_id) {
+uint64_t Customer::HashKey(uint64_t key) {
+  auto str = std::to_string(key).c_str();
+  uint64_t hash = 5381;
+  int c;
+  while (c = (*str)) { // hash(i) = hash(i-1) * 33 ^ str[i]
+    hash = ((hash << 5) + hash) + c; 
+    str++;
+  }
+  return hash;
+}
+
+void Customer::ProcessPullRequest(int tid) {
   {
     std::lock_guard<std::mutex> lock(mu_);
-    LOG(INFO) << "Server inits Pull Thread-" << worker_id;
+    LOG(INFO) << "Server inits Pull Thread-" << tid;
     thread_barrier_.fetch_add(1);
   }
   std::list<Message> pull_consumer;
   bool should_stop = false;
+  std::unordered_map<uint64_t, int > pull_finished_cnt;
+
   while (!should_stop) {
     {
-      std::lock_guard<std::mutex> lock(mu_);
-      CHECK_LE((unsigned int) worker_id, buffered_pull_.size()) << worker_id << ", " << buffered_pull_.size();
-      pull_consumer.splice(pull_consumer.end(), buffered_pull_[worker_id]);
-      buffered_pull_[worker_id].clear();
+      std::lock_guard<std::mutex> lock(pull_mu_[tid]);
+      CHECK_LT((unsigned int) tid, buffered_pull_.size());
+      if (buffered_pull_[tid].size() != 0) {
+        pull_consumer.splice(pull_consumer.end(), buffered_pull_[tid]);
+        buffered_pull_[tid].clear();
+      } else { 
+        // only sleep when there is no pending requests too
+        if (pull_consumer.size() == 0) { 
+          std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
+          continue;
+        }
+      }
     }
     auto it = pull_consumer.begin();
     while (it != pull_consumer.end()) {
@@ -116,14 +151,16 @@ void Customer::ProcessPullRequest(int worker_id) {
       }
       CHECK(!msg.meta.push);
       uint64_t key = GetKeyFromMsg(msg);
-      std::lock_guard<std::mutex> lock(key_mu_);
-      if (is_push_finished_[key].load() && (pull_collected_[key].find(worker_id) == pull_collected_[key].end())) {
-        pull_collected_[key].insert(worker_id);
-        if (pull_collected_[key].size() == (unsigned int) num_worker) {
-          is_push_finished_[key] = false;
-          pull_collected_[key].clear();
-        }
+      if (pull_finished_cnt.find(key) == pull_finished_cnt.end()) {
+        pull_finished_cnt.emplace(key, 0);
+      }
+      std::lock_guard<std::mutex> lock(map_mu_);
+      if (is_push_finished_[key].load()) {
         recv_handle_(msg);
+        if ((size_t) pull_finished_cnt[key] == num_worker) {
+          is_push_finished_[key] = false;
+          pull_finished_cnt[key] = 0;
+        }
         it = pull_consumer.erase(it);
         if (enable_profile_) {
           Profile pdata = {key, msg.meta.sender, false, GetTimestampNow(), false};
@@ -137,10 +174,10 @@ void Customer::ProcessPullRequest(int worker_id) {
   }
 }
 
-void Customer::ProcessPushRequest(int thread_id) {
+void Customer::ProcessPushRequest(int tid) {
   {
     std::lock_guard<std::mutex> lock(mu_);
-    LOG(INFO) << "Server inits Push Thread-" << thread_id;
+    LOG(INFO) << "Server inits Push Thread-" << tid;
     thread_barrier_.fetch_add(1);
   }
   std::unordered_map<uint64_t, int> push_finished_cnt;
@@ -148,15 +185,22 @@ void Customer::ProcessPushRequest(int thread_id) {
   bool should_stop = false;
   while (!should_stop) {
     {
-      std::lock_guard<std::mutex> lock(mu_);
-      CHECK_LE((unsigned int) thread_id, buffered_push_.size()) << thread_id << ", " << buffered_push_.size();
-      push_consumer.splice(push_consumer.end(), buffered_push_[thread_id]);
-      buffered_push_[thread_id].clear();
+      std::lock_guard<std::mutex> lock(push_mu_[tid]);
+      CHECK_LT((unsigned int) tid, buffered_push_.size());
+      if (buffered_push_[tid].size() != 0) {
+        push_consumer.splice(push_consumer.end(), buffered_push_[tid]);
+        buffered_push_[tid].clear();
+      } else { 
+        // only sleep when there is no pending requests too
+        if (push_consumer.size() == 0) { 
+          std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
+          continue;
+        }
+      }
     }
     auto it = push_consumer.begin();
     while (it != push_consumer.end()) {
       Message &msg = *it;
-
       if (!msg.meta.control.empty() && msg.meta.control.cmd == Control::TERMINATE) {
         if (push_consumer.size() == 1) {
           should_stop = true;
@@ -164,7 +208,6 @@ void Customer::ProcessPushRequest(int thread_id) {
         }
         continue; // should first finish the requests that are still in the buffer
       }
-
       CHECK(msg.meta.push);
       uint64_t key = GetKeyFromMsg(msg);
       recv_handle_(msg);
@@ -172,21 +215,18 @@ void Customer::ProcessPushRequest(int thread_id) {
         Profile pdata = {key, msg.meta.sender, true, GetTimestampNow(), false};
         pdata_queue_.Push(pdata);
       }
-
       it = push_consumer.erase(it);
-
-      // we probably don't need this, but just in case
-      if (push_finished_cnt.find(key) == push_finished_cnt.end()) push_finished_cnt[key] = 0;
-
+      // init the push counter of each key
+      if (push_finished_cnt.find(key) == push_finished_cnt.end()) {
+        push_finished_cnt.emplace(key, 0);
+      } 
       // we assume the init has already been handled by main thread
       ++push_finished_cnt[key];
-
       if ((size_t) push_finished_cnt[key] == num_worker) {
-        std::lock_guard<std::mutex> lock(key_mu_);
+        std::lock_guard<std::mutex> lock(map_mu_);
         is_push_finished_[key] = true;
         push_finished_cnt[key] = 0;
       }
-
     }
   }
 }
@@ -233,32 +273,6 @@ void Customer::ProcessProfileData() {
   LOG(INFO) << "profile thread ended";
 }
 
-void Customer::ProcessResponse(int thread_id) {
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    LOG(INFO) << "Inits Thread-" << thread_id;
-  }
-  std::list<Message> consumer;
-  while (true) {
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      consumer.splice(consumer.end(), worker_buffer_[thread_id]);
-      worker_buffer_[thread_id].clear();
-    }
-    auto it = consumer.begin();
-    while (it != consumer.end()) {
-      Message &msg = *it;
-      if (!msg.meta.control.empty() && msg.meta.control.cmd == Control::TERMINATE) { break; }
-      recv_handle_(msg);
-      CHECK(!msg.meta.request); // must be response
-      std::lock_guard<std::mutex> lk(tracker_mu_);
-      tracker_[msg.meta.timestamp].second++;
-      tracker_cond_.notify_all();
-      it = consumer.erase(it);
-    }
-  }
-}
-
 std::string Customer::GetTimestampNow() {
   std::chrono::microseconds us =
       std::chrono::duration_cast<std::chrono::microseconds >(std::chrono::system_clock::now().time_since_epoch());
@@ -274,63 +288,70 @@ void Customer::Receiving() {
   val = CHECK_NOTNULL(Environment::Get()->find("DMLC_ROLE"));
   std::string role(val);
   bool is_server = role == "server";
-  val = Environment::Get()->find("ENABLE_SERVER_MULTIPULL");
+  val = Environment::Get()->find("BYTEPS_ENABLE_SERVER_MULTIPULL");
   bool is_server_multi_pull_enabled = val ? atoi(val) : true; // default enabled
-  val = Environment::Get()->find("ENABLE_WORKER_MULTIPULL");
-  bool is_worker_multi_pull_enabled = val ? atoi(val) : false; // default disabled, has bug yet
-  val = Environment::Get()->find("WORKER_THREAD_NUM");
-  int worker_thread_num = val ? atoi(val) : 4;
-  val = Environment::Get()->find("SERVER_PUSH_NTHREADS");
+  val = Environment::Get()->find("BYTEPS_SERVER_PUSH_NTHREADS");
   int server_push_nthread = val ? atoi(val) : 1;
+  val = Environment::Get()->find("BYTEPS_SERVER_PULL_NTHREADS");
+  int server_pull_nthread = val ? atoi(val) : 1;
   val = Environment::Get()->find("BYTEPS_ENABLE_ASYNC");
   bool enable_async = val ? atoi(val) : false;
   if (is_server && enable_async) {
     is_server_multi_pull_enabled = false;
   }
-
   // profiling
   val = Environment::Get()->find("BYTEPS_SERVER_ENABLE_PROFILE");
   enable_profile_ = val ? atoi(val) : false;
   std::thread* profile_thread;
   if (enable_profile_ && is_server) {
-    LOG(INFO) << "Enable server profiling";
+    PS_VLOG(1) << "Enable server profiling";
     profile_thread = new std::thread(&Customer::ProcessProfileData, this);
   }
 
-  if (is_server && is_server_multi_pull_enabled){ // server multi-thread
-    LOG(INFO) << "Use separate thread to process pull requests from each worker.";
+  if (is_server && is_server_multi_pull_enabled) { // server multi-thread
+    PS_VLOG(1) << "Use separate thread to process pull requests from each worker.";
 
+    // prepare push threads
     std::vector<std::thread *> push_thread;
     for (int i = 0; i < server_push_nthread; ++i) {
       std::list<Message> buf;
       buffered_push_.push_back(buf);
     }
     CHECK_EQ(buffered_push_.size(), (unsigned int) server_push_nthread);
+    // prepare the mutexes before initing the threads
+    std::vector<std::mutex> tmp_push_mu_list(server_push_nthread);
+    push_mu_.swap(tmp_push_mu_list);
+    // initiate push threads
     for (int i = 0; i < server_push_nthread; ++i) {
       std::lock_guard<std::mutex> lock(mu_);
       auto t = new std::thread(&Customer::ProcessPushRequest, this, i);
       push_thread.push_back(t);
     }
-    LOG(INFO) << "Server uses " << server_push_nthread << " threads to process push requests.";
 
+    // prepare pull threads
     std::vector<std::thread *> pull_thread;
-    for (size_t i = 0; i < num_worker; ++i) {
+    for (int i = 0; i < server_pull_nthread; ++i) {
       std::list<Message> buf;
       buffered_pull_.push_back(buf);
     }
-    CHECK_EQ(buffered_pull_.size(), (unsigned int) num_worker);
-    for (size_t i = 0; i < num_worker; ++i) {
+    CHECK_EQ(buffered_pull_.size(), (unsigned int) server_pull_nthread);
+    // prepare the mutexes before initing the threads
+    std::vector<std::mutex> tmp_pull_mu_list(server_pull_nthread);
+    pull_mu_.swap(tmp_pull_mu_list);
+    // initiate pull threads
+    for (int i = 0; i < server_pull_nthread; ++i) {
       std::lock_guard<std::mutex> lock(mu_);
       auto t = new std::thread(&Customer::ProcessPullRequest, this, i);
       pull_thread.push_back(t);
     }
-
-    while (1) { // wait until all threads have been inited
-      int total_thread_num = num_worker + server_push_nthread;
+    
+    // wait until all threads have been inited
+    while (1) { 
+      int total_thread_num = server_push_nthread + server_pull_nthread;
       if (thread_barrier_.fetch_add(0) == total_thread_num) break;
       std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
     }
-    LOG(INFO) << "All threads inited, ready to process message ";
+    PS_VLOG(1) << "All push & pull threads inited, ready to process message ";
 
     std::unordered_map<uint64_t, std::set<int> > init_push_;
 
@@ -361,95 +382,46 @@ void Customer::Receiving() {
         int sender = recv.meta.sender;
         CHECK_EQ(init_push_[key].find(sender), init_push_[key].end())
             << key << " " << sender;
-
         init_push_[key].insert(sender);
         recv_handle_(recv);
-
         // Reset the push flag, to guarantee that subsequent pulls are blocked.
         // We might be able to remove this, but just in case the compiler does not work as we expect.
         if (init_push_[key].size() == num_worker) {
-          std::lock_guard<std::mutex> lock(key_mu_);
+          std::lock_guard<std::mutex> lock(map_mu_);
           is_push_finished_[key] = false;
         }
-
         continue;
       }
       CHECK_EQ(init_push_[key].size(), num_worker);
 
       if (recv.meta.push) { // push: same key goes to same thread
-        std::lock_guard<std::mutex> lock(mu_);
+        auto tid = HashKey(key) % server_push_nthread;
+        std::lock_guard<std::mutex> lock(push_mu_[tid]);
         if (enable_profile_) {
           Profile pdata = {key, recv.meta.sender, true, GetTimestampNow(), true};
           pdata_queue_.Push(pdata);
         }
-        buffered_push_[(key/num_server) % server_push_nthread].push_back(recv);
+        buffered_push_[tid].push_back(recv);
       } else { // pull
-        std::lock_guard<std::mutex> lock(mu_);
+        auto tid = HashKey(key) % server_pull_nthread;
+        std::lock_guard<std::mutex> lock(pull_mu_[tid]);
         if (enable_profile_) {
           Profile pdata = {key, recv.meta.sender, false, GetTimestampNow(), true};
           pdata_queue_.Push(pdata);
         }
-        int worker_id = (recv.meta.sender - 9) / 2; // worker id: 9, 11, 13 ...
-        buffered_pull_[worker_id].push_back(recv);
+        buffered_pull_[tid].push_back(recv);
       }
-
     } // while
-
     // wait until the threads finish
     for (auto t : push_thread) t->join();
     for (auto t : pull_thread) t->join();
     if (profile_thread) profile_thread->join();
-
-  } // server multi-thread
-
-  else if (!is_server && is_worker_multi_pull_enabled) { // worker multithread
-    CHECK_GE(worker_thread_num, 1);
-    LOG(INFO) << "Use multiple threads to process pull responses.";
-    std::vector<std::thread *> worker_thread;
-    for (int i = 0; i < worker_thread_num; ++i) {
-      std::list<Message> buf;
-      worker_buffer_.push_back(buf);
-      auto t = new std::thread(&Customer::ProcessResponse, this, i);
-      worker_thread.push_back(t);
-    }
-    CHECK_EQ((unsigned int) worker_thread_num, worker_buffer_.size());
+  } else { // original
     while (true) {
       Message recv;
       recv_queue_.WaitAndPop(&recv);
-      if (!recv.meta.control.empty() && recv.meta.control.cmd == Control::TERMINATE) {
-        Message terminate_msg;
-        terminate_msg.meta.control.cmd = Control::TERMINATE;
-        std::lock_guard<std::mutex> lock(mu_);
-        for (auto buf : worker_buffer_) {
-          buf.push_back(terminate_msg);
-        }
-        break;
-      }
-      if (!IsValidPushpull(recv)) {
-        recv_handle_(recv);
-        if (!recv.meta.request) {
-          std::lock_guard<std::mutex> lk(tracker_mu_);
-          tracker_[recv.meta.timestamp].second++;
-          tracker_cond_.notify_all();
-        }
-        continue;
-      }
-      int thread_id = GetKeyFromMsg(recv) % worker_thread_num; // a simple load balanced strategy
-      std::lock_guard<std::mutex> lock(mu_);
-      worker_buffer_[thread_id].push_back(recv);
-    }
-    for (auto t : worker_thread) {
-      t->join();
-    }
-  }  // worker multithread
-
-  else { // original
-    LOG(INFO) << "Do not use thread pool for receiving.";
-
-    while (true) {
-      Message recv;
-      recv_queue_.WaitAndPop(&recv);
-      if (!recv.meta.control.empty() && recv.meta.control.cmd == Control::TERMINATE) {
+      if (!recv.meta.control.empty() 
+            && recv.meta.control.cmd == Control::TERMINATE) {
         break;
       }
       recv_handle_(recv);
@@ -459,7 +431,6 @@ void Customer::Receiving() {
         tracker_cond_.notify_all();
       }
     }
-
   } // original
 }
 

@@ -107,6 +107,7 @@ class Customer {
   uint64_t GetKeyFromMsg(const Message& msg);
   void ProcessResponse(int thread_id);
   std::string GetTimestampNow();
+  uint64_t HashKey(uint64_t key);
 
  private:
   /**
