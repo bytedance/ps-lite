@@ -137,13 +137,7 @@ void Customer::ProcessPullRequest(int tid) {
       if (buffered_pull_[tid].size() != 0) {
         pull_consumer.splice(pull_consumer.end(), buffered_pull_[tid]);
         buffered_pull_[tid].clear();
-      } else { 
-        // only sleep when there is no pending requests too
-        // if (pull_consumer.size() == 0) { 
-        //   std::this_thread::sleep_for(std::chrono::nanoseconds(1));
-        //   continue;
-        // }
-      }
+      } 
     }
     auto it = pull_consumer.begin();
     while (it != pull_consumer.end()) {
@@ -196,13 +190,7 @@ void Customer::ProcessPushRequest(int tid) {
       if (buffered_push_[tid].size() != 0) {
         push_consumer.splice(push_consumer.end(), buffered_push_[tid]);
         buffered_push_[tid].clear();
-      } else { 
-        // only sleep when there is no pending requests too
-        // if (push_consumer.size() == 0) { 
-        //   std::this_thread::sleep_for(std::chrono::nanoseconds(1));
-        //   continue;
-        // }
-      }
+      } 
     }
     auto it = push_consumer.begin();
     while (it != push_consumer.end()) {
