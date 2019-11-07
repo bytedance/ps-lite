@@ -28,13 +28,14 @@ namespace ps {
 const int Node::kEmpty = std::numeric_limits<int>::max();
 const int Meta::kEmpty = std::numeric_limits<int>::max();
 size_t num_worker, num_server;
-std::mutex mu_;
+int server_push_nthread;
+int server_pull_nthread;
+std::mutex hash_mu_;
 std::vector<std::mutex> push_mu_;
 std::vector<std::mutex> pull_mu_;
 std::vector<std::list<Message> > buffered_push_;
 std::vector<std::list<Message> > buffered_pull_;
 
-std::mutex map_mu_; // try to protect "is_push_finished_" to avoid race
 std::unordered_map<uint64_t, std::atomic<bool> > is_push_finished_;
 std::atomic<int> thread_barrier_{0};
 bool enable_profile_ = false;
@@ -52,6 +53,10 @@ Customer::Customer(int app_id, int customer_id, const Customer::RecvHandle& recv
   CHECK_GE(num_worker, 1);
   val = Environment::Get()->find("DMLC_NUM_SERVER");
   num_server = atoi(val);
+  val = Environment::Get()->find("BYTEPS_SERVER_PUSH_NTHREADS");
+  server_push_nthread = val ? atoi(val) : 1;
+  val = Environment::Get()->find("BYTEPS_SERVER_PULL_NTHREADS");
+  server_pull_nthread = val ? atoi(val) : 1;
   CHECK_GE(num_server, 1);
 }
 
@@ -106,6 +111,7 @@ uint64_t Customer::GetKeyFromMsg(const Message &msg) {
 }
 
 uint64_t Customer::HashKey(uint64_t key) {
+  std::lock_guard<std::mutex> lock(hash_mu_);
   if (hash_cache_.find(key) != hash_cache_.end()) {
     return hash_cache_[key];
   }
@@ -121,14 +127,10 @@ uint64_t Customer::HashKey(uint64_t key) {
 }
 
 void Customer::ProcessPullRequest(int tid) {
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    LOG(INFO) << "Server inits Pull Thread-" << tid;
-    thread_barrier_.fetch_add(1);
-  }
+  thread_barrier_.fetch_add(1);
   std::list<Message> pull_consumer;
   bool should_stop = false;
-  std::unordered_map<uint64_t, int > pull_finished_cnt;
+  std::unordered_map<uint64_t, size_t> pull_finished_cnt;
 
   while (!should_stop) {
     {
@@ -154,11 +156,19 @@ void Customer::ProcessPullRequest(int tid) {
       if (pull_finished_cnt.find(key) == pull_finished_cnt.end()) {
         pull_finished_cnt.emplace(key, 0);
       }
-      std::lock_guard<std::mutex> lock(map_mu_);
+      // should have been inited
+      auto push_tid = HashKey(key) % server_push_nthread;
+      push_mu_[push_tid].lock();
+      CHECK_NE(is_push_finished_.find(key), is_push_finished_.end()) << key;
       if (is_push_finished_[key].load()) {
+        push_mu_[push_tid].unlock();
+        CHECK_LT(pull_finished_cnt[key], num_worker) << pull_finished_cnt[key];
         recv_handle_(msg);
+        ++pull_finished_cnt[key];
         if ((size_t) pull_finished_cnt[key] == num_worker) {
+          push_mu_[push_tid].lock();
           is_push_finished_[key] = false;
+          push_mu_[push_tid].unlock();
           pull_finished_cnt[key] = 0;
         }
         it = pull_consumer.erase(it);
@@ -168,6 +178,7 @@ void Customer::ProcessPullRequest(int tid) {
         }
         break;
       } else {
+        push_mu_[push_tid].unlock();
         ++it;
       }
     }
@@ -175,11 +186,7 @@ void Customer::ProcessPullRequest(int tid) {
 }
 
 void Customer::ProcessPushRequest(int tid) {
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    LOG(INFO) << "Server inits Push Thread-" << tid;
-    thread_barrier_.fetch_add(1);
-  }
+  thread_barrier_.fetch_add(1);
   std::unordered_map<uint64_t, int> push_finished_cnt;
   std::list<Message> push_consumer;
   bool should_stop = false;
@@ -217,7 +224,7 @@ void Customer::ProcessPushRequest(int tid) {
       // we assume the init has already been handled by main thread
       ++push_finished_cnt[key];
       if ((size_t) push_finished_cnt[key] == num_worker) {
-        std::lock_guard<std::mutex> lock(map_mu_);
+        std::lock_guard<std::mutex> lock(push_mu_[tid]);
         is_push_finished_[key] = true;
         push_finished_cnt[key] = 0;
       }
@@ -283,10 +290,6 @@ void Customer::Receiving() {
   bool is_server = role == "server";
   val = Environment::Get()->find("BYTEPS_ENABLE_SERVER_MULTIPULL");
   bool is_server_multi_pull_enabled = val ? atoi(val) : true; // default enabled
-  val = Environment::Get()->find("BYTEPS_SERVER_PUSH_NTHREADS");
-  int server_push_nthread = val ? atoi(val) : 1;
-  val = Environment::Get()->find("BYTEPS_SERVER_PULL_NTHREADS");
-  int server_pull_nthread = val ? atoi(val) : 1;
   val = Environment::Get()->find("BYTEPS_ENABLE_ASYNC");
   bool enable_async = val ? atoi(val) : false;
   if (is_server && enable_async) {
@@ -316,7 +319,6 @@ void Customer::Receiving() {
     push_mu_.swap(tmp_push_mu_list);
     // initiate push threads
     for (int i = 0; i < server_push_nthread; ++i) {
-      std::lock_guard<std::mutex> lock(mu_);
       auto t = new std::thread(&Customer::ProcessPushRequest, this, i);
       push_thread.push_back(t);
     }
@@ -333,14 +335,13 @@ void Customer::Receiving() {
     pull_mu_.swap(tmp_pull_mu_list);
     // initiate pull threads
     for (int i = 0; i < server_pull_nthread; ++i) {
-      std::lock_guard<std::mutex> lock(mu_);
       auto t = new std::thread(&Customer::ProcessPullRequest, this, i);
       pull_thread.push_back(t);
     }
     
     // wait until all threads have been inited
+    int total_thread_num = server_push_nthread + server_pull_nthread;
     while (1) { 
-      int total_thread_num = server_push_nthread + server_pull_nthread;
       if (thread_barrier_.fetch_add(0) == total_thread_num) break;
       std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
     }
@@ -381,7 +382,8 @@ void Customer::Receiving() {
         // Reset the push flag, to guarantee that subsequent pulls are blocked.
         // We might be able to remove this, but just in case the compiler does not work as we expect.
         if (init_push_[key].size() == num_worker) {
-          std::lock_guard<std::mutex> lock(map_mu_);
+          auto tid = HashKey(key) % server_push_nthread;
+          std::lock_guard<std::mutex> lock(push_mu_[tid]);
           is_push_finished_[key] = false;
         }
         continue;
