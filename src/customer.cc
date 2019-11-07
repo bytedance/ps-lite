@@ -107,7 +107,7 @@ uint64_t Customer::HashKey(uint64_t key) {
   auto str = std::to_string(key).c_str();
   uint64_t hash = 5381;
   int c;
-  while (c = (*str)) { // hash(i) = hash(i-1) * 33 ^ str[i]
+  while ((c = *str)) { // hash(i) = hash(i-1) * 33 ^ str[i]
     hash = ((hash << 5) + hash) + c; 
     str++;
   }
@@ -133,10 +133,10 @@ void Customer::ProcessPullRequest(int tid) {
         buffered_pull_[tid].clear();
       } else { 
         // only sleep when there is no pending requests too
-        if (pull_consumer.size() == 0) { 
-          std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
-          continue;
-        }
+        // if (pull_consumer.size() == 0) { 
+        //   std::this_thread::sleep_for(std::chrono::nanoseconds(1));
+        //   continue;
+        // }
       }
     }
     auto it = pull_consumer.begin();
@@ -192,10 +192,10 @@ void Customer::ProcessPushRequest(int tid) {
         buffered_push_[tid].clear();
       } else { 
         // only sleep when there is no pending requests too
-        if (push_consumer.size() == 0) { 
-          std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
-          continue;
-        }
+        // if (push_consumer.size() == 0) { 
+        //   std::this_thread::sleep_for(std::chrono::nanoseconds(1));
+        //   continue;
+        // }
       }
     }
     auto it = push_consumer.begin();
@@ -234,7 +234,7 @@ void Customer::ProcessPushRequest(int tid) {
 void Customer::ProcessProfileData() {
   LOG(INFO) << "profile thread is inited";
   bool profile_all = true; // default: profile all keys
-  uint64_t key_to_profile;
+  uint64_t key_to_profile = 0;
   const char *val;
   val = Environment::Get()->find("BYTEPS_SERVER_KEY_TO_PROFILE");
   if (val) {
@@ -302,7 +302,7 @@ void Customer::Receiving() {
   // profiling
   val = Environment::Get()->find("BYTEPS_SERVER_ENABLE_PROFILE");
   enable_profile_ = val ? atoi(val) : false;
-  std::thread* profile_thread;
+  std::thread* profile_thread = nullptr;
   if (enable_profile_ && is_server) {
     PS_VLOG(1) << "Enable server profiling";
     profile_thread = new std::thread(&Customer::ProcessProfileData, this);
