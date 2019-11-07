@@ -39,6 +39,8 @@ std::unordered_map<uint64_t, std::atomic<bool> > is_push_finished_;
 std::atomic<int> thread_barrier_{0};
 bool enable_profile_ = false;
 
+std::unordered_map<uint64_t, uint64_t> hash_cache_;
+
 Customer::Customer(int app_id, int customer_id, const Customer::RecvHandle& recv_handle)
     : app_id_(app_id), customer_id_(customer_id), recv_handle_(recv_handle) {
   Postoffice::Get()->AddCustomer(this);
@@ -104,6 +106,9 @@ uint64_t Customer::GetKeyFromMsg(const Message &msg) {
 }
 
 uint64_t Customer::HashKey(uint64_t key) {
+  if (hash_cache_.find(key) != hash_cache_.end()) {
+    return hash_cache_[key];
+  }
   auto str = std::to_string(key).c_str();
   uint64_t hash = 5381;
   int c;
@@ -111,6 +116,7 @@ uint64_t Customer::HashKey(uint64_t key) {
     hash = ((hash << 5) + hash) + c; 
     str++;
   }
+  hash_cache_[key] = hash;
   return hash;
 }
 
@@ -241,7 +247,6 @@ void Customer::ProcessProfileData() {
     profile_all = false;
     key_to_profile = atoi(val);
   }
-
   std::fstream fout_;
   val = Environment::Get()->find("BYTEPS_SERVER_PROFILE_OUTPUT_PATH");
   fout_.open((val ? std::string(val) : "server_profile.json"), std::fstream::out);
@@ -361,12 +366,13 @@ void Customer::Receiving() {
       if (!recv.meta.control.empty() && recv.meta.control.cmd == Control::TERMINATE) {
         Message terminate_msg;
         terminate_msg.meta.control.cmd = Control::TERMINATE;
-        std::lock_guard<std::mutex> lock(mu_);
-        for (auto buf : buffered_push_) {
-          buf.push_back(terminate_msg);
+        for (int i = 0; i < server_push_nthread; ++i) {
+          std::lock_guard<std::mutex> lock(push_mu_[i]);
+          buffered_push_[i].push_back(terminate_msg);
         }
-        for (auto buf : buffered_pull_) {
-          buf.push_back(terminate_msg);
+        for (int i = 0; i < server_pull_nthread; ++i) {
+          std::lock_guard<std::mutex> lock(pull_mu_[i]);
+          buffered_pull_[i].push_back(terminate_msg);
         }
         break;
       }
