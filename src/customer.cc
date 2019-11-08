@@ -159,9 +159,10 @@ void Customer::ProcessPullRequest(int tid) {
       // should have been inited
       auto push_tid = HashKey(key) % server_push_nthread;
       push_mu_[push_tid].lock();
+      auto is_finish = is_push_finished_[key].load();
       CHECK_NE(is_push_finished_.find(key), is_push_finished_.end()) << key;
-      if (is_push_finished_[key].load()) {
-        push_mu_[push_tid].unlock();
+      push_mu_[push_tid].unlock();
+      if (is_finish) {
         CHECK_LT(pull_finished_cnt[key], num_worker) << pull_finished_cnt[key];
         recv_handle_(msg);
         ++pull_finished_cnt[key];
@@ -178,7 +179,6 @@ void Customer::ProcessPullRequest(int tid) {
         }
         break;
       } else {
-        push_mu_[push_tid].unlock();
         ++it;
       }
     }
@@ -288,12 +288,12 @@ void Customer::Receiving() {
   val = CHECK_NOTNULL(Environment::Get()->find("DMLC_ROLE"));
   std::string role(val);
   bool is_server = role == "server";
-  val = Environment::Get()->find("BYTEPS_ENABLE_SERVER_MULTIPULL");
-  bool is_server_multi_pull_enabled = val ? atoi(val) : true; // default enabled
+  val = Environment::Get()->find("BYTEPS_ENABLE_SERVER_MULTITHREAD");
+  bool is_server_multi_thread_enabled = val ? atoi(val) : true; // default enabled
   val = Environment::Get()->find("BYTEPS_ENABLE_ASYNC");
   bool enable_async = val ? atoi(val) : false;
   if (is_server && enable_async) {
-    is_server_multi_pull_enabled = false;
+    is_server_multi_thread_enabled = false;
   }
   // profiling
   val = Environment::Get()->find("BYTEPS_SERVER_ENABLE_PROFILE");
@@ -304,7 +304,7 @@ void Customer::Receiving() {
     profile_thread = new std::thread(&Customer::ProcessProfileData, this);
   }
 
-  if (is_server && is_server_multi_pull_enabled) { // server multi-thread
+  if (is_server && is_server_multi_thread_enabled) { // server multi-thread
     PS_VLOG(1) << "Use separate thread to process pull requests from each worker.";
 
     // prepare push threads
