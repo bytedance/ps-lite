@@ -31,6 +31,7 @@ size_t num_worker, num_server;
 int server_push_nthread;
 int server_pull_nthread;
 std::mutex hash_mu_;
+std::mutex map_mu_;
 std::vector<std::mutex> push_mu_;
 std::vector<std::mutex> pull_mu_;
 std::vector<std::list<Message> > buffered_push_;
@@ -158,18 +159,18 @@ void Customer::ProcessPullRequest(int tid) {
       }
       // should have been inited
       auto push_tid = HashKey(key) % server_push_nthread;
-      push_mu_[push_tid].lock();
+      map_mu_.lock();
       auto is_finish = is_push_finished_[key].load();
       CHECK_NE(is_push_finished_.find(key), is_push_finished_.end()) << key;
-      push_mu_[push_tid].unlock();
+      map_mu_.unlock();
       if (is_finish) {
         CHECK_LT(pull_finished_cnt[key], num_worker) << pull_finished_cnt[key];
         recv_handle_(msg);
         ++pull_finished_cnt[key];
         if ((size_t) pull_finished_cnt[key] == num_worker) {
-          push_mu_[push_tid].lock();
+          map_mu_.lock();
           is_push_finished_[key] = false;
-          push_mu_[push_tid].unlock();
+          map_mu_.unlock();
           pull_finished_cnt[key] = 0;
         }
         it = pull_consumer.erase(it);
@@ -224,7 +225,7 @@ void Customer::ProcessPushRequest(int tid) {
       // we assume the init has already been handled by main thread
       ++push_finished_cnt[key];
       if ((size_t) push_finished_cnt[key] == num_worker) {
-        std::lock_guard<std::mutex> lock(push_mu_[tid]);
+        std::lock_guard<std::mutex> lock(map_mu_);
         is_push_finished_[key] = true;
         push_finished_cnt[key] = 0;
       }
@@ -383,7 +384,7 @@ void Customer::Receiving() {
         // We might be able to remove this, but just in case the compiler does not work as we expect.
         if (init_push_[key].size() == num_worker) {
           auto tid = HashKey(key) % server_push_nthread;
-          std::lock_guard<std::mutex> lock(push_mu_[tid]);
+          std::lock_guard<std::mutex> lock(map_mu_);
           is_push_finished_[key] = false;
         }
         continue;
