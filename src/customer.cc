@@ -1,3 +1,6 @@
+/**	
+ *  Copyright (c) 2015 by Contributors	
+ */
 #include "ps/internal/customer.h"
 #include "ps/internal/postoffice.h"
 #include "ps/internal/threadsafe_queue.h"
