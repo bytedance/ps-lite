@@ -475,7 +475,6 @@ struct Endpoint {
 class RDMAVan : public Van {
  public:
   RDMAVan() {
-    LOG(INFO) << "ibv_fork_init";
     CHECK_EQ(ibv_fork_init(), 0) << strerror(errno);
   }
   ~RDMAVan() {}
