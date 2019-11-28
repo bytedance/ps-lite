@@ -34,6 +34,9 @@
 
 namespace ps {
 
+#define DIVUP(x, y) (((x)+(y)-1)/(y))
+#define ROUNDUP(x, y) (DIVUP((x), (y))*(y))
+
 static const int kStartDepth = 128;
 static const int kWriteDepth = kStartDepth;
 
@@ -52,6 +55,7 @@ static const size_t kAlignment = 8;
 static const int kMaxResolveRetry = 50000;
 static const int kBasePort = 9010;
 
+
 template <typename T>
 static inline T align_floor(T v, T align) {
   return v - (v % align);
@@ -60,6 +64,16 @@ static inline T align_floor(T v, T align) {
 template <typename T>
 static inline T align_ceil(T v, T align) {
   return align_floor(v + align - 1, align);
+}
+
+static inline void ib_malloc(void** ptr, size_t size) {
+  size_t page_size = sysconf(_SC_PAGESIZE);
+  void* p;
+  int size_aligned = ROUNDUP(size, page_size);
+  int ret = posix_memalign(&p, page_size, size_aligned);
+  CHECK_EQ(ret, 0) << "posix_memalign error: " << strerror(ret);
+  memset(p, 0, size);
+  *ptr = p;
 }
 
 class SimpleMempool {
@@ -78,7 +92,8 @@ class SimpleMempool {
                << ", mempool num set to " << mempool_num;
     
     for (size_t i = 0; i < mempool_num; ++i) {
-      char *p = reinterpret_cast<char *>(aligned_alloc(kAlignment, size));
+      char *p;
+      ib_malloc((void**) &p, size);
       total_allocated_size += size;
       CHECK(p);
       CHECK(mr = ibv_reg_mr(pd, p, size,
@@ -455,7 +470,10 @@ struct Endpoint {
 
 class RDMAVan : public Van {
  public:
-  RDMAVan() {}
+  RDMAVan() {
+    LOG(INFO) << "ibv_fork_init";
+    ibv_fork_init();
+  }
   ~RDMAVan() {}
 
  protected:
