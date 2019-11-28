@@ -127,7 +127,8 @@ class SimpleMempool {
       while (proper_size > new_mem_size) {
         new_mem_size *= 2;
       }
-      char *p = reinterpret_cast<char *>(aligned_alloc(kAlignment, new_mem_size));
+      char *p;
+      ib_malloc((void**) &p, new_mem_size);
       CHECK(p);
       struct ibv_mr *mr;
       CHECK(mr = ibv_reg_mr(pd_, p, new_mem_size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
@@ -400,7 +401,8 @@ struct Endpoint {
                              ThreadsafeQueue<WRContext *> *queue, size_t num,
                              WRContextType type) {
     for (size_t i = 0; i < num; ++i) {
-      void *buf = aligned_alloc(kAlignment, kMempoolChunkSize);
+      void *buf;
+      ib_malloc((void**) &buf, kMempoolChunkSize);
       CHECK(buf);
       struct ibv_mr *mr = ibv_reg_mr(pd, buf, kMempoolChunkSize, 0);
       CHECK(mr);
@@ -435,7 +437,8 @@ struct Endpoint {
                           kWriteContext);
 
     for (size_t i = 0; i < kRxDepth; ++i) {
-      void *buf = aligned_alloc(kAlignment, kMempoolChunkSize);
+      void *buf;
+      ib_malloc((void**) &buf, kMempoolChunkSize);
       CHECK(buf);
       struct ibv_mr *mr =
           ibv_reg_mr(pd, buf, kMempoolChunkSize, IBV_ACCESS_LOCAL_WRITE);
