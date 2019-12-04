@@ -11,6 +11,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 #include <netdb.h>
 #include <poll.h>
 #include <stddef.h>
@@ -40,7 +43,8 @@ namespace ps {
 static const int kStartDepth = 128;
 static const int kWriteDepth = kStartDepth;
 
-static const int kRxDepth = kStartDepth * 2;
+static const int kIpcDepth = 32;
+static const int kRxDepth = kStartDepth + kWriteDepth + kIpcDepth;
 static const int kReplyDepth = kRxDepth;
 
 static const int kSGEntry = 4;
@@ -55,6 +59,8 @@ static const size_t kAlignment = 8;
 static const int kMaxResolveRetry = 50000;
 static const int kBasePort = 9010;
 
+// should have the same prefix with BytePS shared memory
+static const std::string kShmPrefix("BytePS_ShM_");
 
 template <typename T>
 static inline T align_floor(T v, T align) {
@@ -230,6 +236,7 @@ class Block {
 enum MessageTypes : uint32_t {
   kRendezvousStart,
   kRendezvousReply,
+  kRendezvousIPC,
 };
 
 struct RendezvousStart {
@@ -246,9 +253,17 @@ struct RendezvousReply {
   uint32_t idx;
 };
 
+struct RendezvousIPC {
+  uint64_t key;
+  int len;
+  uint64_t meta_len;
+  uint64_t origin_addr;
+};
+
 enum WRContextType {
   kRendezvousStartContext,
   kRendezvousReplyContext,
+  kRendezvousIPCContext,
   kWriteContext,
   kReceiveContext
 };
@@ -287,11 +302,13 @@ static_assert(std::is_pod<RendezvousStart>::value,
               "RendezvousStart must be a POD type.");
 static_assert(std::is_pod<RendezvousReply>::value,
               "RendezvousReply must be a POD type.");
+static_assert(std::is_pod<RendezvousIPC>::value,
+              "RendezvousReply must be a POD type.");
 static_assert(std::is_pod<RequestContext>::value,
               "RequestContext must be a POD type.");
 
 static const size_t kMempoolChunkSize =
-    std::max(sizeof(RendezvousStart), sizeof(RendezvousReply));
+    std::max({sizeof(RendezvousStart), sizeof(RendezvousReply), sizeof(RendezvousIPC)});
 
 template <typename T>
 class AddressPool {
@@ -350,9 +367,12 @@ struct Endpoint {
   WRContext reply_ctx[kReplyDepth];
   WRContext write_ctx[kWriteDepth];
 
+  WRContext ipc_ctx[kIpcDepth];
+
   ThreadsafeQueue<WRContext *> free_start_ctx;
   ThreadsafeQueue<WRContext *> free_reply_ctx;
   ThreadsafeQueue<WRContext *> free_write_ctx;
+  ThreadsafeQueue<WRContext *> free_ipc_ctx;
 
   Endpoint() : status(IDLE), node_id(Node::kEmpty), cm_id(nullptr), rx_ctx() {}
 
@@ -383,6 +403,13 @@ struct Endpoint {
       if (write_ctx[i].buffer) {
         free(write_ctx[i].buffer->addr);
         CHECK_EQ(ibv_dereg_mr(write_ctx[i].buffer), 0);
+      }
+    }
+
+    for (int i = 0; i < kIpcDepth; ++i) {
+      if (ipc_ctx[i].buffer) {
+        free(ipc_ctx[i].buffer->addr);
+        CHECK_EQ(ibv_dereg_mr(ipc_ctx[i].buffer), 0);
       }
     }
 
@@ -420,7 +447,7 @@ struct Endpoint {
     memset(&attr, 0, sizeof(ibv_qp_init_attr));
     attr.send_cq = cq;
     attr.recv_cq = cq;
-    attr.cap.max_send_wr = kStartDepth + kReplyDepth + kWriteDepth;
+    attr.cap.max_send_wr = kStartDepth + kReplyDepth + kWriteDepth + kIpcDepth;
     attr.cap.max_recv_wr = kRxDepth;
     attr.cap.max_send_sge = kSGEntry;
     attr.cap.max_recv_sge = kSGEntry;
@@ -436,6 +463,8 @@ struct Endpoint {
                           kRendezvousReplyContext);
     InitSendContextHelper(pd, write_ctx, &free_write_ctx, kWriteDepth,
                           kWriteContext);
+    InitSendContextHelper(pd, ipc_ctx, &free_ipc_ctx, kIpcDepth,
+                          kRendezvousIPCContext);
 
     for (size_t i = 0; i < kRxDepth; ++i) {
       void *buf;
@@ -493,7 +522,7 @@ class RDMAVan : public Van {
     val = Environment::Get()->find("ENABLE_RDMA_LOG");
     enable_rdma_log_ = val? atoi(val) : false;
     if (enable_rdma_log_) LOG(INFO) << "Enable RDMA logging";
-    else LOG(INFO) << "RDMA logging is disabled, you can enable it with ENABLE_RDMA_LOG=1";
+    else LOG(INFO) << "You can enable RDMA logging with ENABLE_RDMA_LOG=1";
 
     if (event_channel_ == nullptr) {
       event_channel_ = rdma_create_event_channel();
@@ -593,7 +622,11 @@ class RDMAVan : public Van {
       return;
     }
 
-    std::string node_host_ip = node.hostname + ":" + std::to_string(node.port);
+    {
+      std::lock_guard<std::mutex> lock(local_mu_);
+      is_local_[node.id] = (node.hostname == my_node_.hostname) ? true : false;
+    }
+
     if (node.id != Node::kEmpty) {
       auto it = endpoints_.find(node.id);
 
@@ -713,7 +746,6 @@ class RDMAVan : public Van {
         std::lock_guard<std::mutex> lock(map_mu_);
         uint64_t key = DecodeKey(msg.data[0]);
         msg.meta.key = key;
-        //LOG(INFO) << "key=" << key << ", " << std::string(msg.meta.push?"push":"pull");
 
         if (msg.meta.push && msg.meta.request) { // push request
           CHECK_EQ(msg.data.size(), 3) << msg.data.size();
@@ -784,9 +816,11 @@ class RDMAVan : public Van {
     } else { // data message
       msg_buf->inline_len = meta_len;
       msg_buf->inline_buf = mempool_->Alloc(meta_len);
-      msg_buf->data = msg.data;
+      if (!is_local_[remote_id]) {
+        msg_buf->data = msg.data;
+      }
       meta.SerializeToArray(msg_buf->inline_buf, meta_len);
-      if (!is_server) { // worker remains the same
+      if (!is_server && !is_local_[remote_id]) { // worker, send to non-local servers
         for (auto &sa : msg_buf->data) {
           if (sa.size()) {
             auto search_map_iterator = memory_mr_map.find(sa.data());
@@ -845,26 +879,59 @@ class RDMAVan : public Van {
         << "ibv_post_send failed.";
     }
 
-    WRContext *context = nullptr, *reserved = nullptr;
-    endpoint->free_write_ctx.WaitAndPop(&reserved);
-    endpoint->free_start_ctx.WaitAndPop(&context);
+    if (!is_server && is_local_[remote_id] && IsValidPushpull(msg)) { 
+      // worker, IPC through shared memory
+      WRContext *context = nullptr;
+      endpoint->free_ipc_ctx.WaitAndPop(&context);
 
-    msg_buf->reserved_context = reserved;
+      RendezvousIPC *req =
+          reinterpret_cast<RendezvousIPC *>(context->buffer->addr);
+      req->key = msg.meta.key;
+      req->len = msg.meta.val_len;
+      req->origin_addr = reinterpret_cast<uint64_t>(msg_buf);
+      req->meta_len = meta_len;
 
-    RendezvousStart *req =
-        reinterpret_cast<RendezvousStart *>(context->buffer->addr);
-    req->meta_len = meta_len;
+      auto addr = reinterpret_cast<uint64_t>(req);
+      SendRendezvousBegin(endpoint, addr, context, kRendezvousIPC);
 
-    for (size_t i = 0; i < msg.data.size(); ++i) {
-      req->data_len[i] = msg.data[i].size();
+    } else { // original, send to remote via rdma 
+      WRContext *context = nullptr, *reserved = nullptr;
+      endpoint->free_write_ctx.WaitAndPop(&reserved);
+      endpoint->free_start_ctx.WaitAndPop(&context);
+
+      msg_buf->reserved_context = reserved;
+      RendezvousStart *req =
+          reinterpret_cast<RendezvousStart *>(context->buffer->addr);
+      req->meta_len = meta_len;
+
+      for (size_t i = 0; i < msg.data.size(); ++i) {
+        req->data_len[i] = msg.data[i].size();
+      }
+      req->data_num = msg.data.size();
+      req->origin_addr = reinterpret_cast<uint64_t>(msg_buf);
+
+      auto addr = reinterpret_cast<uint64_t>(req);
+      SendRendezvousBegin(endpoint, addr, context, kRendezvousStart);
     }
-    req->data_num = msg.data.size();
-    req->origin_addr = reinterpret_cast<uint64_t>(msg_buf);
 
+    return total_len;
+  }
+
+  void SendRendezvousBegin(Endpoint* endpoint, uint64_t origin_addr, WRContext *context, MessageTypes msg_type) {
     struct ibv_sge sge;
-    sge.addr = reinterpret_cast<uint64_t>(req);
-    sge.length = sizeof(RendezvousStart);
+    sge.addr = origin_addr;      
     sge.lkey = context->buffer->lkey;
+
+    switch (msg_type) {
+      case kRendezvousIPC: {
+        sge.length = sizeof(RendezvousIPC);
+      } break;
+      case kRendezvousStart: {
+        sge.length = sizeof(RendezvousStart);
+      } break;
+      default:
+        CHECK(0);
+    }
 
     struct ibv_send_wr wr, *bad_wr = nullptr;
     memset(&wr, 0, sizeof(wr));
@@ -873,15 +940,13 @@ class RDMAVan : public Van {
     wr.opcode = IBV_WR_SEND_WITH_IMM;
     wr.next = nullptr;
 
-    wr.imm_data = kRendezvousStart;
+    wr.imm_data = msg_type;
 
     wr.send_flags = IBV_SEND_SIGNALED;
     wr.sg_list = &sge;
     wr.num_sge = 1;
     CHECK_EQ(ibv_post_send(endpoint->cm_id->qp, &wr, &bad_wr), 0)
         << strerror(errno);
-
-    return total_len;
   }
 
   int RecvMsg(Message *msg) override {
@@ -904,7 +969,33 @@ class RDMAVan : public Van {
     uint64_t data_num = buffer_ctx->data_num;
     cur += buffer_ctx->meta_len;
 
-    if (IsValidPushpull(*msg) && !msg->meta.push && !msg->meta.request) { // worker
+    if (is_server && is_local_[msg->meta.sender]) {
+      auto key = msg->meta.key;
+      auto len = msg->meta.val_len;
+
+      std::lock_guard<std::mutex> lock(map_mu_);
+      CHECK_NE(key_addr_map_.find(key), key_addr_map_.end());
+      CHECK_NE(key_len_map_.find(key), key_len_map_.end());
+
+      SArray<char> keys;
+      SArray<char> vals;
+      SArray<char> lens;
+      // TODO: need to decode the key back to original shm, also pay attention to the shm offset
+      void* addr = OpenSharedMemory(kShmPrefix, key, len);
+      keys.reset(reinterpret_cast<char*>(&key_addr_map_[key]), sizeof(ps::Key), [](void *){});
+      vals.reset(reinterpret_cast<char*>(addr), len, [](void *){});
+      lens.reset(reinterpret_cast<char*>(&key_len_map_[key]), sizeof(int), [](void *){});
+
+      msg->data.push_back(keys);
+      msg->data.push_back(vals);
+      msg->data.push_back(lens);
+      
+      total_len += keys.size() + vals.size() + lens.size();
+      mempool_->Free(buffer_ctx->buffer);
+    }
+
+    if (IsValidPushpull(*msg) && !msg->meta.push && !msg->meta.request) { 
+      // worker, get message directly from inplace tensor
       std::lock_guard<std::mutex> lock(map_mu_);
       auto key = msg->meta.key;
       CHECK(!is_server);
@@ -1016,6 +1107,9 @@ class RDMAVan : public Van {
       case kRendezvousReplyContext:
         endpoint->free_reply_ctx.Push(context);
         break;
+      case kRendezvousIPCContext:
+        endpoint->free_ipc_ctx.Push(context);
+        break;
       case kWriteContext:
         endpoint->free_write_ctx.Push(context);
         break;
@@ -1025,6 +1119,57 @@ class RDMAVan : public Van {
       default:
         CHECK(0);
     }
+  }
+  
+  void* OpenSharedMemory(const std::string& prefix, uint64_t key, size_t size) {
+    std::string shm_name(prefix);
+    shm_name += std::to_string(key);
+    int shm_fd = shm_open(shm_name.c_str(), O_CREAT | O_RDWR, 0666);
+    CHECK_GE(shm_fd, 0) << "shm_open failed for " << shm_name;
+    CHECK_GE(ftruncate(shm_fd, size), 0) << strerror(errno);
+
+    void* ptr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    CHECK_NE(ptr, (void*) -1) << strerror(errno);
+
+    LOG(INFO) << "open Shared Memory: " << shm_name;
+    // std::lock_guard<std::mutex> lock(_shm_mu);
+    // _key_shm_addr[shm_name] = ptr;
+    // _key_shm_size[shm_name] = size;
+    return ptr;
+  }
+
+  void SendRendezvousReply(Endpoint* endpoint, BufferContext *buf_ctx, uint64_t origin_addr) {
+    WRContext *reply_ctx = nullptr;
+    endpoint->free_reply_ctx.WaitAndPop(&reply_ctx);
+    RendezvousReply *resp =
+        reinterpret_cast<RendezvousReply *>(reply_ctx->buffer->addr);
+
+    char* buffer = buf_ctx->buffer;
+    resp->addr = reinterpret_cast<uint64_t>(buffer);
+    resp->rkey = mempool_->RemoteKey(buffer);
+    resp->origin_addr = origin_addr;
+    resp->idx = addr_pool_.StoreAddress(buf_ctx);
+
+    struct ibv_sge sge;
+    sge.addr = reinterpret_cast<uint64_t>(resp);
+    sge.length = sizeof(RendezvousReply);
+    sge.lkey = reply_ctx->buffer->lkey;
+
+    struct ibv_send_wr wr, *bad_wr = nullptr;
+    memset(&wr, 0, sizeof(wr));
+
+    wr.wr_id = reinterpret_cast<uint64_t>(reply_ctx);
+    wr.opcode = IBV_WR_SEND_WITH_IMM;
+    wr.next = nullptr;
+
+    wr.imm_data = kRendezvousReply;
+
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+
+    CHECK_EQ(ibv_post_send(endpoint->cm_id->qp, &wr, &bad_wr), 0)
+        << "ibv_post_send failed.";
   }
 
   void PollCQ() {
@@ -1075,8 +1220,8 @@ class RDMAVan : public Van {
               // LOG(INFO) << "opcode: IBV_WC_RECV kRendezvousStart";
               RendezvousStart *req =
                   reinterpret_cast<RendezvousStart *>(mr->addr);
+                                  
               BufferContext *buf_ctx = new BufferContext();
-
               uint64_t len = req->meta_len;
               buf_ctx->meta_len = req->meta_len;
               buf_ctx->data_num = req->data_num;
@@ -1084,45 +1229,33 @@ class RDMAVan : public Van {
                 buf_ctx->data_len[i] = req->data_len[i];
                 len += req->data_len[i];
               }
-
               char *buffer = mempool_->Alloc(is_server ? len : req->meta_len);
-              CHECK(buffer) << "Alloc for " << len
-                            << " bytes, data_num: " << req->data_num;
-
+              CHECK(buffer) << len;
               buf_ctx->buffer = buffer;
 
-              uint64_t origin_addr = req->origin_addr;
+              SendRendezvousReply(endpoint, buf_ctx, req->origin_addr);
 
-              WRContext *reply_ctx = nullptr;
-              endpoint->free_reply_ctx.WaitAndPop(&reply_ctx);
-              RendezvousReply *resp =
-                  reinterpret_cast<RendezvousReply *>(reply_ctx->buffer->addr);
+            } else if (imm == kRendezvousIPC) { 
+              RendezvousIPC *req =
+                  reinterpret_cast<RendezvousIPC *>(mr->addr);
+              auto key = req->key;
+              auto len = req->len;
 
-              resp->addr = reinterpret_cast<uint64_t>(buffer);
-              resp->rkey = mempool_->RemoteKey(buffer);
-              resp->origin_addr = origin_addr;
-              resp->idx = addr_pool_.StoreAddress(buf_ctx);
+              BufferContext *buf_ctx = new BufferContext();
+              buf_ctx->meta_len = req->meta_len;
+              buf_ctx->data_num = 0;
+              char *buffer = mempool_->Alloc(req->meta_len);
+              CHECK(buffer) << req->meta_len;
+              buf_ctx->buffer = buffer;
 
-              struct ibv_sge sge;
-              sge.addr = reinterpret_cast<uint64_t>(resp);
-              sge.length = sizeof(RendezvousReply);
-              sge.lkey = reply_ctx->buffer->lkey;
+              SendRendezvousReply(endpoint, buf_ctx, req->origin_addr);
 
-              struct ibv_send_wr wr, *bad_wr = nullptr;
-              memset(&wr, 0, sizeof(wr));
-
-              wr.wr_id = reinterpret_cast<uint64_t>(reply_ctx);
-              wr.opcode = IBV_WR_SEND_WITH_IMM;
-              wr.next = nullptr;
-
-              wr.imm_data = kRendezvousReply;
-
-              wr.send_flags = IBV_SEND_SIGNALED;
-              wr.sg_list = &sge;
-              wr.num_sge = 1;
-
-              CHECK_EQ(ibv_post_send(endpoint->cm_id->qp, &wr, &bad_wr), 0)
-                  << "ibv_post_send failed.";
+              // TODO: 
+              std::lock_guard<std::mutex> lock(map_mu_);
+              if (key_len_map_.find(key) == key_len_map_.end()) {
+                key_addr_map_[key] = key;
+                key_len_map_[key] = len;
+              }
 
             } else if (imm == kRendezvousReply) {
               // LOG(INFO) << "opcode: IBV_WC_RECV kRendezvousReply";
@@ -1408,6 +1541,9 @@ class RDMAVan : public Van {
   std::unordered_map<ps::Key, int> key_len_map_;
 
   std::mutex map_mu_;
+
+  std::mutex local_mu_;
+  std::unordered_map<int, bool> is_local_;
 
 };  // namespace ps
 };  // namespace ps
