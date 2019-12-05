@@ -720,6 +720,39 @@ class RDMAVan : public Van {
     return key;
   }
 
+  void SendRendezvousBegin(Endpoint* endpoint, 
+        uint64_t origin_addr, WRContext *context, MessageTypes msg_type) {
+    struct ibv_sge sge;
+    sge.addr = origin_addr;      
+    sge.lkey = context->buffer->lkey;
+
+    switch (msg_type) {
+      case kRendezvousIPC: {
+        sge.length = sizeof(RendezvousIPC);
+      } break;
+      case kRendezvousStart: {
+        sge.length = sizeof(RendezvousStart);
+      } break;
+      default:
+        CHECK(0);
+    }
+
+    struct ibv_send_wr wr, *bad_wr = nullptr;
+    memset(&wr, 0, sizeof(wr));
+
+    wr.wr_id = reinterpret_cast<uint64_t>(context);
+    wr.opcode = IBV_WR_SEND_WITH_IMM;
+    wr.next = nullptr;
+
+    wr.imm_data = msg_type;
+
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    CHECK_EQ(ibv_post_send(endpoint->cm_id->qp, &wr, &bad_wr), 0)
+        << strerror(errno);
+  }
+
   int SendMsg(Message &msg) override {
     int remote_id = msg.meta.recver;
     CHECK_NE(remote_id, Meta::kEmpty);
@@ -741,6 +774,7 @@ class RDMAVan : public Van {
       }
     }
 
+    // init for inplace push_pull
     if (IsValidPushpull(msg)) {
       if (!is_server) { // worker
         std::lock_guard<std::mutex> lock(map_mu_);
@@ -792,7 +826,6 @@ class RDMAVan : public Van {
 
     PBMeta meta;
     PackMetaPB(msg.meta, &meta);
-
     CHECK_NE(endpoints_.find(remote_id), endpoints_.end());
     Endpoint *endpoint = endpoints_[remote_id].get();
     MessageBuffer *msg_buf = new MessageBuffer();
@@ -800,9 +833,9 @@ class RDMAVan : public Van {
     size_t meta_len = meta.ByteSize();
     size_t data_len = msg.meta.data_size;
     size_t total_len = meta_len + data_len;
-
     CHECK(meta_len);
 
+    // prepare memory
     if (msg.meta.simple_app || !msg.meta.control.empty()){ // simple_app or control message
       msg_buf->inline_len = total_len;
       msg_buf->inline_buf = mempool_->Alloc(total_len);
@@ -833,11 +866,13 @@ class RDMAVan : public Van {
       }
     }
 
+    // server send pull response (vals) with RDMA-write / IPC
     if (is_server && IsValidPushpull(msg) &&
-          !msg.meta.push && !msg.meta.request) { // server send pull response (vals) with RDMA-write
+          !msg.meta.push && !msg.meta.request) { 
       std::lock_guard<std::mutex> lock(map_mu_);
       auto key = msg.meta.key;
       auto recver = msg.meta.recver;
+      auto len = std::get<0>(key_meta_map_[key][recver]);
 
       CHECK_EQ(msg_buf->data.size(), 3) << "Actual msg_buf size is " << msg_buf->data.size();
       CHECK_NE(key_meta_map_.find(key), key_meta_map_.end())
@@ -846,41 +881,51 @@ class RDMAVan : public Van {
             << "key=" << key
             << ", recver=" << recver
             << " not initiated";
-
-      auto len = std::get<0>(key_meta_map_[key][recver]);
-      auto raddr = std::get<1>(key_meta_map_[key][recver]);
-      auto rkey = std::get<2>(key_meta_map_[key][recver]);
-
       CHECK_EQ(msg_buf->data[1].size(), (unsigned int) len)
-                << msg_buf->data[1].size() << ", " << len;
+            << msg_buf->data[1].size() << ", " << len;
 
-      auto temp_mr = memory_mr_map.find(msg_buf->data[1].data());
-      CHECK_NE(temp_mr, memory_mr_map.end());
+      if (is_local_[remote_id]) { 
+        // IPC
+        auto addr = msg_buf->data[1].data();
+        CHECK(addr);
+        // TODO: need to decode the key back to original shm, also pay attention to the shm offset
+        void* shm_addr = OpenSharedMemory(kShmPrefix, key, len);
+        // TODO: use async copy
+        memcpy(shm_addr, addr, len);
+      } else { 
+        // RDMA write
+        auto raddr = std::get<1>(key_meta_map_[key][recver]);
+        auto rkey = std::get<2>(key_meta_map_[key][recver]);
 
-      struct ibv_sge sge;
-      sge.addr = reinterpret_cast<uint64_t>(msg_buf->data[1].data());
-      sge.length = msg_buf->data[1].size();
-      sge.lkey = temp_mr->second->lkey;
+        auto temp_mr = memory_mr_map.find(msg_buf->data[1].data());
+        CHECK_NE(temp_mr, memory_mr_map.end());
 
-      struct ibv_send_wr wr, *bad_wr = nullptr;
-      memset(&wr, 0, sizeof(wr));
+        struct ibv_sge sge;
+        sge.addr = reinterpret_cast<uint64_t>(msg_buf->data[1].data());
+        sge.length = msg_buf->data[1].size();
+        sge.lkey = temp_mr->second->lkey;
 
-      wr.wr_id = reinterpret_cast<uint64_t>(raddr);
-      wr.opcode = IBV_WR_RDMA_WRITE;
-      wr.next = nullptr;
-      // wr.send_flags = IBV_SEND_SIGNALED;
-      wr.sg_list = &sge;
-      wr.num_sge = 1;
+        struct ibv_send_wr wr, *bad_wr = nullptr;
+        memset(&wr, 0, sizeof(wr));
 
-      wr.wr.rdma.remote_addr = raddr;
-      wr.wr.rdma.rkey = rkey;
+        wr.wr_id = reinterpret_cast<uint64_t>(raddr);
+        wr.opcode = IBV_WR_RDMA_WRITE;
+        wr.next = nullptr;
+        // wr.send_flags = IBV_SEND_SIGNALED;
+        wr.sg_list = &sge;
+        wr.num_sge = 1;
 
-      CHECK_EQ(ibv_post_send(endpoint->cm_id->qp, &wr, &bad_wr), 0)
-        << "ibv_post_send failed.";
+        wr.wr.rdma.remote_addr = raddr;
+        wr.wr.rdma.rkey = rkey;
+
+        CHECK_EQ(ibv_post_send(endpoint->cm_id->qp, &wr, &bad_wr), 0)
+          << "ibv_post_send failed.";
+      }
     }
 
+    // rendezvous message, not data message
     if (!is_server && is_local_[remote_id] && IsValidPushpull(msg)) { 
-      // worker, IPC through shared memory
+      // local IPC with shared memory
       WRContext *context = nullptr;
       endpoint->free_ipc_ctx.WaitAndPop(&context);
 
@@ -893,8 +938,8 @@ class RDMAVan : public Van {
 
       auto addr = reinterpret_cast<uint64_t>(req);
       SendRendezvousBegin(endpoint, addr, context, kRendezvousIPC);
-
-    } else { // original, send to remote via rdma 
+    } else { 
+      // normal RDMA
       WRContext *context = nullptr, *reserved = nullptr;
       endpoint->free_write_ctx.WaitAndPop(&reserved);
       endpoint->free_start_ctx.WaitAndPop(&context);
@@ -915,38 +960,6 @@ class RDMAVan : public Van {
     }
 
     return total_len;
-  }
-
-  void SendRendezvousBegin(Endpoint* endpoint, uint64_t origin_addr, WRContext *context, MessageTypes msg_type) {
-    struct ibv_sge sge;
-    sge.addr = origin_addr;      
-    sge.lkey = context->buffer->lkey;
-
-    switch (msg_type) {
-      case kRendezvousIPC: {
-        sge.length = sizeof(RendezvousIPC);
-      } break;
-      case kRendezvousStart: {
-        sge.length = sizeof(RendezvousStart);
-      } break;
-      default:
-        CHECK(0);
-    }
-
-    struct ibv_send_wr wr, *bad_wr = nullptr;
-    memset(&wr, 0, sizeof(wr));
-
-    wr.wr_id = reinterpret_cast<uint64_t>(context);
-    wr.opcode = IBV_WR_SEND_WITH_IMM;
-    wr.next = nullptr;
-
-    wr.imm_data = msg_type;
-
-    wr.send_flags = IBV_SEND_SIGNALED;
-    wr.sg_list = &sge;
-    wr.num_sge = 1;
-    CHECK_EQ(ibv_post_send(endpoint->cm_id->qp, &wr, &bad_wr), 0)
-        << strerror(errno);
   }
 
   int RecvMsg(Message *msg) override {
@@ -970,6 +983,7 @@ class RDMAVan : public Van {
     cur += buffer_ctx->meta_len;
 
     if (is_server && is_local_[msg->meta.sender]) {
+      // get data message from local shared memory
       auto key = msg->meta.key;
       auto len = msg->meta.val_len;
 
@@ -1234,7 +1248,6 @@ class RDMAVan : public Van {
               buf_ctx->buffer = buffer;
 
               SendRendezvousReply(endpoint, buf_ctx, req->origin_addr);
-
             } else if (imm == kRendezvousIPC) { 
               RendezvousIPC *req =
                   reinterpret_cast<RendezvousIPC *>(mr->addr);
@@ -1250,13 +1263,11 @@ class RDMAVan : public Van {
 
               SendRendezvousReply(endpoint, buf_ctx, req->origin_addr);
 
-              // TODO: 
               std::lock_guard<std::mutex> lock(map_mu_);
               if (key_len_map_.find(key) == key_len_map_.end()) {
                 key_addr_map_[key] = key;
                 key_len_map_[key] = len;
               }
-
             } else if (imm == kRendezvousReply) {
               // LOG(INFO) << "opcode: IBV_WC_RECV kRendezvousReply";
               RendezvousReply *resp =
