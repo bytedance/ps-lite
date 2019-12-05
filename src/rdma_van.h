@@ -515,8 +515,8 @@ class RDMAVan : public Van {
 
     auto val = Environment::Get()->find("DMLC_ROLE");
     std::string role(val);
-    is_server = role=="server";
-    if (is_server) LOG(INFO) << "This is server";
+    is_server_ = role=="server";
+    if (is_server_) LOG(INFO) << "This is server";
     else LOG(INFO) << "This is " << ((role=="worker") ? "worker" : "scheduler");
 
     val = Environment::Get()->find("ENABLE_RDMA_LOG");
@@ -529,9 +529,12 @@ class RDMAVan : public Van {
 
     val = Environment::Get()->find("BYTEPS_LOCAL_SIZE");
     auto byteps_local_size = val ? atoi(val) : 1;
-
     byteps_partition_bytes_ = AlignTo(byteps_partition_bytes_, (8 * byteps_local_size));
     LOG(INFO) << "partition bytes set to " << byteps_partition_bytes_ << ", should be identical with byteps core";
+
+    val = Environment::Get()->find("BYTEPS_DISABLE_IPC");
+    disable_ipc_ = val ? atoi(val) : disable_ipc_;
+    if (disable_ipc_) LOG(INFO) << "Shared memory IPC has been disabled";
 
     if (event_channel_ == nullptr) {
       event_channel_ = rdma_create_event_channel();
@@ -631,9 +634,12 @@ class RDMAVan : public Van {
       return;
     }
 
-    {
+    if (disable_ipc_) {
+      is_local_[node.id] = false;
+    } else {
       std::lock_guard<std::mutex> lock(local_mu_);
       is_local_[node.id] = (node.hostname == my_node_.hostname) ? true : false;
+      LOG(INFO) << "IPC connected to " << node.id;
     }
 
     if (node.id != Node::kEmpty) {
@@ -736,6 +742,7 @@ class RDMAVan : public Van {
 
   void* GetSharedMemory(const std::string& prefix, uint64_t key, size_t size) {
     std::lock_guard<std::mutex> lock(shm_mu_);
+    LOG(INFO) << "shm: key=" << key << ", size=" << size;
     if (key_shm_addr_.find(key) != key_shm_addr_.end()) {
       return key_shm_addr_[key];
     }
@@ -756,7 +763,7 @@ class RDMAVan : public Van {
     LOG(INFO) << "open Shared Memory: " << shm_name
               << ", offset=" << offset 
               << ", size=" << size;
-    key_shm_addr_[key] = (void*) ((uint64_t*)base_ptr + offset);
+    key_shm_addr_[key] = (void*) CHECK_NOTNULL((uint64_t*) base_ptr + offset);
     return key_shm_addr_[key];
   }
 
@@ -816,7 +823,7 @@ class RDMAVan : public Van {
 
     // init for inplace push_pull
     if (IsValidPushpull(msg)) {
-      if (!is_server) { // worker
+      if (!is_server_) { // worker
         std::lock_guard<std::mutex> lock(map_mu_);
         uint64_t key = DecodeKey(msg.data[0]);
         msg.meta.key = key;
@@ -839,7 +846,7 @@ class RDMAVan : public Van {
         }
       }
       if (!msg.meta.push && !msg.meta.request) { // server, pull response
-        CHECK(is_server);
+        CHECK(is_server_);
         CHECK_EQ(msg.data.size(), 3) << msg.data.size();
 
         std::lock_guard<std::mutex> lock(map_mu_);
@@ -893,7 +900,7 @@ class RDMAVan : public Van {
         msg_buf->data = msg.data;
       }
       meta.SerializeToArray(msg_buf->inline_buf, meta_len);
-      if (!is_server && !is_local_[remote_id]) { // worker, send to non-local servers
+      if (!is_server_ && !is_local_[remote_id]) { // worker, send to non-local servers
         for (auto &sa : msg_buf->data) {
           if (sa.size()) {
             auto search_map_iterator = memory_mr_map.find(sa.data());
@@ -907,7 +914,7 @@ class RDMAVan : public Van {
     }
 
     // server send pull response (vals) with RDMA-write / IPC
-    if (is_server && IsValidPushpull(msg) &&
+    if (is_server_ && IsValidPushpull(msg) &&
           !msg.meta.push && !msg.meta.request) { 
       std::lock_guard<std::mutex> lock(map_mu_);
       auto key = msg.meta.key;
@@ -963,15 +970,18 @@ class RDMAVan : public Van {
     }
 
     // rendezvous message, not data message
-    if (!is_server && is_local_[remote_id] && IsValidPushpull(msg)) { 
+    if (!is_server_ && is_local_[remote_id] && IsValidPushpull(msg)) { 
       // local IPC with shared memory
       WRContext *context = nullptr;
       endpoint->free_ipc_ctx.WaitAndPop(&context);
+      auto key = DecodeKey(msg.data[0]);
 
+      LOG(INFO) << "send key=" << key;
+      CHECK_EQ(key, msg.meta.key);
       RendezvousIPC *req =
           reinterpret_cast<RendezvousIPC *>(context->buffer->addr);
-      req->key = msg.meta.key;
-      req->len = msg.meta.val_len;
+      req->key = key;
+      req->len = data_len;
       req->origin_addr = reinterpret_cast<uint64_t>(msg_buf);
       req->meta_len = meta_len;
 
@@ -1021,13 +1031,13 @@ class RDMAVan : public Van {
     uint64_t data_num = buffer_ctx->data_num;
     cur += buffer_ctx->meta_len;
 
-    if (is_server && is_local_[msg->meta.sender]) {
+    if (is_server_ && IsValidPushpull(*msg) && is_local_[msg->meta.sender]) {
       // get data message from local shared memory
       auto key = msg->meta.key;
       auto len = msg->meta.val_len;
 
       std::lock_guard<std::mutex> lock(map_mu_);
-      CHECK_NE(key_addr_map_.find(key), key_addr_map_.end());
+      CHECK_NE(key_addr_map_.find(key), key_addr_map_.end()) << key;
       CHECK_NE(key_len_map_.find(key), key_len_map_.end());
 
       SArray<char> keys;
@@ -1050,7 +1060,7 @@ class RDMAVan : public Van {
       // worker, get message directly from inplace tensor
       std::lock_guard<std::mutex> lock(map_mu_);
       auto key = msg->meta.key;
-      CHECK(!is_server);
+      CHECK(!is_server_);
       if (key_len_map_.find(key) == key_len_map_.end()) {
         key_addr_map_[key] = (ps::Key) key;
         key_len_map_[key] = (int) msg->meta.val_len;
@@ -1095,7 +1105,7 @@ class RDMAVan : public Van {
     }
 
     if (msg->meta.push && msg->meta.request) { // server
-      CHECK(is_server);
+      CHECK(is_server_);
       auto key = msg->meta.key;
       auto len = msg->meta.val_len;
       auto addr = msg->meta.addr;
@@ -1264,12 +1274,13 @@ class RDMAVan : public Van {
                 buf_ctx->data_len[i] = req->data_len[i];
                 len += req->data_len[i];
               }
-              char *buffer = mempool_->Alloc(is_server ? len : req->meta_len);
+              char *buffer = mempool_->Alloc(is_server_ ? len : req->meta_len);
               CHECK(buffer) << len;
               buf_ctx->buffer = buffer;
 
               SendRendezvousReply(endpoint, buf_ctx, req->origin_addr);
             } else if (imm == kRendezvousIPC) { 
+              LOG(INFO) << "kRendezvousIPC";
               RendezvousIPC *req =
                   reinterpret_cast<RendezvousIPC *>(mr->addr);
               auto key = req->key;
@@ -1317,7 +1328,7 @@ class RDMAVan : public Van {
                 sge[num_sge].lkey = pair.first->lkey;
                 ++num_sge;
               }
-              if (is_server) CHECK_EQ(num_sge, 1) << num_sge;
+              if (is_server_) CHECK_EQ(num_sge, 1) << num_sge;
 
               WRContext *write_ctx = msg_buf->reserved_context;
 
@@ -1558,7 +1569,7 @@ class RDMAVan : public Van {
   ThreadsafeQueue<std::tuple<Endpoint *, BufferContext *>> recv_buffers_;
 
   // role is server or worker
-  bool is_server;
+  bool is_server_;
   // RDMA logging info
   bool enable_rdma_log_;
 
@@ -1573,6 +1584,8 @@ class RDMAVan : public Van {
   // a static address for the length
   std::unordered_map<ps::Key, int> key_len_map_;
 
+  // local IPC related
+  bool disable_ipc_ = false;
   std::mutex local_mu_;
   std::unordered_map<int, bool> is_local_;
 
