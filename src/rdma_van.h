@@ -508,7 +508,7 @@ class RDMAVan : public Van {
   }
   ~RDMAVan() {}
 
- protected:
+ protected:  
   void Start(int customer_id) override {
     start_mu_.lock();
     should_stop_ = false;
@@ -523,6 +523,15 @@ class RDMAVan : public Van {
     enable_rdma_log_ = val? atoi(val) : false;
     if (enable_rdma_log_) LOG(INFO) << "Enable RDMA logging";
     else LOG(INFO) << "You can enable RDMA logging with ENABLE_RDMA_LOG=1";
+
+    val = Environment::Get()->find("BYTEPS_PARTITION_BYTES");
+    byteps_partition_bytes_ = val ? atoi(val) : 4096000;
+
+    val = Environment::Get()->find("BYTEPS_LOCAL_SIZE");
+    auto byteps_local_size = val ? atoi(val) : 1;
+
+    byteps_partition_bytes_ = AlignTo(byteps_partition_bytes_, (8 * byteps_local_size));
+    LOG(INFO) << "partition bytes set to " << byteps_partition_bytes_ << ", should be identical with byteps core";
 
     if (event_channel_ == nullptr) {
       event_channel_ = rdma_create_event_channel();
@@ -720,6 +729,37 @@ class RDMAVan : public Van {
     return key;
   }
 
+  uint64_t DecodeWorkerKey(uint64_t key) {
+    auto kr = ps::Postoffice::Get()->GetServerKeyRanges()[ps::Postoffice::Get()->my_rank()];
+    return key - kr.begin();
+  }
+
+  void* GetSharedMemory(const std::string& prefix, uint64_t key, size_t size) {
+    std::lock_guard<std::mutex> lock(shm_mu_);
+    if (key_shm_addr_.find(key) != key_shm_addr_.end()) {
+      return key_shm_addr_[key];
+    }
+    auto worker_key = DecodeWorkerKey(key);
+    auto seq_num = worker_key % (1 << 16);
+    auto base_key = worker_key - seq_num;
+    std::string shm_name(prefix);
+    shm_name += std::to_string(base_key);
+    int shm_fd = shm_open(shm_name.c_str(), O_CREAT | O_RDWR, 0666);
+    CHECK_GE(shm_fd, 0) << "shm_open failed for " << shm_name;
+
+    uint64_t offset = byteps_partition_bytes_ * seq_num;
+    CHECK_GE(ftruncate(shm_fd, offset + size), 0) << strerror(errno);
+
+    void* base_ptr = mmap(0, offset + size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    CHECK_NE(base_ptr, (void*) -1) << strerror(errno);
+
+    LOG(INFO) << "open Shared Memory: " << shm_name
+              << ", offset=" << offset 
+              << ", size=" << size;
+    key_shm_addr_[key] = (void*) ((uint64_t*)base_ptr + offset);
+    return key_shm_addr_[key];
+  }
+
   void SendRendezvousBegin(Endpoint* endpoint, 
         uint64_t origin_addr, WRContext *context, MessageTypes msg_type) {
     struct ibv_sge sge;
@@ -888,8 +928,7 @@ class RDMAVan : public Van {
         // IPC
         auto addr = msg_buf->data[1].data();
         CHECK(addr);
-        // TODO: need to decode the key back to original shm, also pay attention to the shm offset
-        void* shm_addr = OpenSharedMemory(kShmPrefix, key, len);
+        void* shm_addr = GetSharedMemory(kShmPrefix, key, len);
         // TODO: use async copy
         memcpy(shm_addr, addr, len);
       } else { 
@@ -994,8 +1033,7 @@ class RDMAVan : public Van {
       SArray<char> keys;
       SArray<char> vals;
       SArray<char> lens;
-      // TODO: need to decode the key back to original shm, also pay attention to the shm offset
-      void* addr = OpenSharedMemory(kShmPrefix, key, len);
+      void* addr = GetSharedMemory(kShmPrefix, key, len);
       keys.reset(reinterpret_cast<char*>(&key_addr_map_[key]), sizeof(ps::Key), [](void *){});
       vals.reset(reinterpret_cast<char*>(addr), len, [](void *){});
       lens.reset(reinterpret_cast<char*>(&key_len_map_[key]), sizeof(int), [](void *){});
@@ -1135,23 +1173,6 @@ class RDMAVan : public Van {
     }
   }
   
-  void* OpenSharedMemory(const std::string& prefix, uint64_t key, size_t size) {
-    std::string shm_name(prefix);
-    shm_name += std::to_string(key);
-    int shm_fd = shm_open(shm_name.c_str(), O_CREAT | O_RDWR, 0666);
-    CHECK_GE(shm_fd, 0) << "shm_open failed for " << shm_name;
-    CHECK_GE(ftruncate(shm_fd, size), 0) << strerror(errno);
-
-    void* ptr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    CHECK_NE(ptr, (void*) -1) << strerror(errno);
-
-    LOG(INFO) << "open Shared Memory: " << shm_name;
-    // std::lock_guard<std::mutex> lock(_shm_mu);
-    // _key_shm_addr[shm_name] = ptr;
-    // _key_shm_size[shm_name] = size;
-    return ptr;
-  }
-
   void SendRendezvousReply(Endpoint* endpoint, BufferContext *buf_ctx, uint64_t origin_addr) {
     WRContext *reply_ctx = nullptr;
     endpoint->free_reply_ctx.WaitAndPop(&reply_ctx);
@@ -1507,6 +1528,8 @@ class RDMAVan : public Van {
     LOG(INFO) << "OnDisconnected from Node " << endpoint->node_id;
   }
 
+  int AlignTo(int input, int alignment) { return input / alignment * alignment; }
+
   AddressPool<BufferContext> addr_pool_;
   std::unique_ptr<SimpleMempool> mempool_;
 
@@ -1534,13 +1557,12 @@ class RDMAVan : public Van {
   // Recv buffer queue
   ThreadsafeQueue<std::tuple<Endpoint *, BufferContext *>> recv_buffers_;
 
-  // JYM: the following are for push/pull buffer reuse
-
-  // whether my role is server or not
+  // role is server or worker
   bool is_server;
   // RDMA logging info
   bool enable_rdma_log_;
 
+  std::mutex map_mu_;
   // macros for key_meta_map
   using MetaInfo = std::tuple<int, uint64_t, int>; // len, addr, rkey
   using SenderMeta = std::unordered_map<int, MetaInfo>; // sender as the key
@@ -1551,10 +1573,13 @@ class RDMAVan : public Van {
   // a static address for the length
   std::unordered_map<ps::Key, int> key_len_map_;
 
-  std::mutex map_mu_;
-
   std::mutex local_mu_;
   std::unordered_map<int, bool> is_local_;
+
+  std::mutex shm_mu_;
+  std::unordered_map<uint64_t, void *> key_shm_addr_;
+
+  int byteps_partition_bytes_ = 4096000;
 
 };  // namespace ps
 };  // namespace ps
