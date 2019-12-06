@@ -535,11 +535,11 @@ class RDMAVan : public Van {
         async_copy_queue_.push_back(q);
       }
       for (int i = 0; i < ipc_copy_nthreads_; ++i) {
-        auto t = new std::thread(&ps::RDMAVan::AsyncCopyThread, i);
+        auto t = new std::thread(&RDMAVan::AsyncCopyThread, this, i);
         ipc_copy_thread_list_.push_back(t);
       }
     }
-
+    
     if (event_channel_ == nullptr) {
       event_channel_ = rdma_create_event_channel();
       CHECK(event_channel_) << "Create RDMA event channel failed";
@@ -585,7 +585,7 @@ class RDMAVan : public Van {
     CHECK(!ibv_destroy_comp_channel(comp_event_channel_))
         << "Failed to destroy channel";
     
-    for (int i = 0; i < ipc_copy_thread_list_.size(); ++i) {
+    for (size_t i = 0; i < ipc_copy_thread_list_.size(); ++i) {
       ipc_copy_thread_list_[i]->join();
     }
 
@@ -807,6 +807,7 @@ class RDMAVan : public Van {
       // do check
       if (m.len == 0) continue;
 
+      // TODO: use parallel copy      
       memcpy(m.dst, m.src, m.len);
 
       WRContext *context = nullptr, *reserved = nullptr;
@@ -961,7 +962,8 @@ class RDMAVan : public Van {
         void* shm_addr = GetSharedMemory(kShmPrefix, key);
         // async copy
         AsyncCopy m = {endpoint, msg_buf, shm_addr, addr, len, meta_len};
-        async_copy_queue_[cpy_counter_++ % ipc_copy_nthreads_]->Push(m);
+        auto cnt = cpy_counter_.fetch_add(1);
+        async_copy_queue_[cnt % ipc_copy_nthreads_]->Push(m);
         return total_len;
       } else { 
         // RDMA write
@@ -1599,7 +1601,7 @@ class RDMAVan : public Van {
   int ipc_copy_nthreads_;
   std::vector<std::thread*> ipc_copy_thread_list_;
   std::vector<ThreadsafeQueue<AsyncCopy>*> async_copy_queue_;
-  uint64_t cpy_counter_ = 0;
+  std::atomic<unsigned long long> cpy_counter_{0};
 };  // namespace ps
 };  // namespace ps
 
