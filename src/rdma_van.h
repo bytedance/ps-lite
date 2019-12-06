@@ -532,8 +532,8 @@ class RDMAVan : public Van {
     byteps_partition_bytes_ = AlignTo(byteps_partition_bytes_, (8 * byteps_local_size));
     LOG(INFO) << "partition bytes set to " << byteps_partition_bytes_ << ", should be identical with byteps core";
 
-    val = Environment::Get()->find("BYTEPS_DISABLE_IPC");
-    disable_ipc_ = val ? atoi(val) : disable_ipc_;
+    val = Environment::Get()->find("BYTEPS_ENABLE_IPC");
+    disable_ipc_ = val ? !atoi(val) : true;
     if (disable_ipc_) LOG(INFO) << "Shared memory IPC has been disabled";
 
     if (event_channel_ == nullptr) {
@@ -1035,6 +1035,7 @@ class RDMAVan : public Van {
     uint64_t data_num = buffer_ctx->data_num;
     cur += buffer_ctx->meta_len;
 
+    bool is_released = false;
     if (is_server_ && IsValidPushpull(*msg) && is_local_[msg->meta.sender]) {
       // get data message from local shared memory
       auto key = msg->meta.key;
@@ -1058,6 +1059,7 @@ class RDMAVan : public Van {
       
       total_len += keys.size() + vals.size() + lens.size();
       mempool_->Free(buffer_ctx->buffer);
+      is_released = true;
     }
 
     if (IsValidPushpull(*msg) && !msg->meta.push && !msg->meta.request) { 
@@ -1105,6 +1107,7 @@ class RDMAVan : public Van {
         total_len += len;
       }
     } else {
+      if (!is_released)
       mempool_->Free(buffer_ctx->buffer);
     }
 
