@@ -479,6 +479,15 @@ struct Endpoint {
   }
 };
 
+struct AsyncCopy {
+  Endpoint* endpoint;
+  MessageBuffer* msg_buf;
+  void* dst;
+  void* src;
+  int len;
+  uint64_t meta_len;
+};
+
 class RDMAVan : public Van {
  public:
   RDMAVan() {
@@ -515,6 +524,20 @@ class RDMAVan : public Van {
     if (!disable_ipc_) {
       CHECK(val) << "BYTEPS_LOCAL_SIZE not set";
       LOG(INFO) << "partition bytes set to " << byteps_partition_bytes_ << ", should be identical with byteps core";
+    }
+
+    val = Environment::Get()->find("BYTEPS_IPC_COPY_NUM_THREADS");
+    ipc_copy_nthreads_ = val ? atoi(val) : 1;
+    if (!disable_ipc_) {
+      LOG(INFO) << "IPC async copy nthreads set to " << ipc_copy_nthreads_;
+      for (int i = 0; i < ipc_copy_nthreads_; ++i) {
+        auto q = new ThreadsafeQueue<AsyncCopy>;
+        async_copy_queue_.push_back(q);
+      }
+      for (int i = 0; i < ipc_copy_nthreads_; ++i) {
+        auto t = new std::thread(&ps::RDMAVan::AsyncCopyThread, i);
+        ipc_copy_thread_list_.push_back(t);
+      }
     }
 
     if (event_channel_ == nullptr) {
@@ -561,6 +584,10 @@ class RDMAVan : public Van {
     CHECK(!ibv_destroy_cq(cq_)) << "Failed to destroy CQ";
     CHECK(!ibv_destroy_comp_channel(comp_event_channel_))
         << "Failed to destroy channel";
+    
+    for (int i = 0; i < ipc_copy_thread_list_.size(); ++i) {
+      ipc_copy_thread_list_[i]->join();
+    }
 
     // TODO: ibv_dealloc_pd sometimes complains resource busy, need to fix this
     // CHECK(!ibv_dealloc_pd(pd_)) << "Failed to deallocate PD: " <<
@@ -772,6 +799,32 @@ class RDMAVan : public Van {
         << strerror(errno);
   }
 
+  void AsyncCopyThread(int i) {
+    auto& q = async_copy_queue_[i];
+    while (true) {
+      AsyncCopy m;
+      q->WaitAndPop(&m);
+      // do check
+      if (m.len == 0) continue;
+
+      memcpy(m.dst, m.src, m.len);
+
+      WRContext *context = nullptr, *reserved = nullptr;
+      m.endpoint->free_write_ctx.WaitAndPop(&reserved);
+      m.endpoint->free_start_ctx.WaitAndPop(&context);
+      
+      m.msg_buf->reserved_context = reserved;
+      RendezvousStart *req =
+          reinterpret_cast<RendezvousStart *>(context->buffer->addr);
+      req->meta_len = m.meta_len;
+      req->origin_addr = reinterpret_cast<uint64_t>(m.msg_buf);
+      
+      auto addr = reinterpret_cast<uint64_t>(req);
+      req->data_num = 0; 
+      SendRendezvousBegin(m.endpoint, addr, context, kRendezvousStart);      
+    }
+  }
+
   int SendMsg(Message &msg) override {
     int remote_id = msg.meta.recver;
     CHECK_NE(remote_id, Meta::kEmpty);
@@ -903,11 +956,13 @@ class RDMAVan : public Van {
 
       if (is_local_[remote_id]) { 
         // IPC
-        auto addr = msg_buf->data[1].data();
+        auto addr = (void*) msg_buf->data[1].data();
         CHECK(addr);
         void* shm_addr = GetSharedMemory(kShmPrefix, key);
-        // TODO: use async copy
-        memcpy(shm_addr, addr, len);
+        // async copy
+        AsyncCopy m = {endpoint, msg_buf, shm_addr, addr, len, meta_len};
+        async_copy_queue_[cpy_counter_++ % ipc_copy_nthreads_]->Push(m);
+        return total_len;
       } else { 
         // RDMA write
         auto raddr = std::get<1>(key_meta_map_[key][recver]);
@@ -964,9 +1019,7 @@ class RDMAVan : public Van {
         req->data_len[i] = msg.data[i].size();
       }
     }
-
     SendRendezvousBegin(endpoint, addr, context, kRendezvousStart);
-
     return total_len;
   }
 
@@ -1543,6 +1596,10 @@ class RDMAVan : public Van {
 
   int byteps_partition_bytes_ = 4096000;
 
+  int ipc_copy_nthreads_;
+  std::vector<std::thread*> ipc_copy_thread_list_;
+  std::vector<ThreadsafeQueue<AsyncCopy>*> async_copy_queue_;
+  uint64_t cpy_counter_ = 0;
 };  // namespace ps
 };  // namespace ps
 
