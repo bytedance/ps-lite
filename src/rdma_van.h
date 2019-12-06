@@ -972,12 +972,16 @@ class RDMAVan : public Van {
     // rendezvous message, not data message
     if (!is_server_ && is_local_[remote_id] && IsValidPushpull(msg)) { 
       // local IPC with shared memory
-      WRContext *context = nullptr;
+      WRContext *context = nullptr, *reserved = nullptr;
+      endpoint->free_write_ctx.WaitAndPop(&reserved);
       endpoint->free_ipc_ctx.WaitAndPop(&context);
+      
+      msg_buf->reserved_context = reserved;
+      
       auto key = DecodeKey(msg.data[0]);
-
       LOG(INFO) << "send key=" << key;
       CHECK_EQ(key, msg.meta.key);
+      
       RendezvousIPC *req =
           reinterpret_cast<RendezvousIPC *>(context->buffer->addr);
       req->key = key;
