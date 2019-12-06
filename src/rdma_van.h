@@ -254,9 +254,9 @@ struct RendezvousReply {
 };
 
 struct RendezvousIPC {
-  uint64_t key;
-  int len;
   uint64_t meta_len;
+  uint64_t data_num;
+  uint64_t key;
   uint64_t origin_addr;
 };
 
@@ -742,7 +742,6 @@ class RDMAVan : public Van {
 
   void* GetSharedMemory(const std::string& prefix, uint64_t key, size_t size) {
     std::lock_guard<std::mutex> lock(shm_mu_);
-    LOG(INFO) << "shm: key=" << key << ", size=" << size;
     if (key_shm_addr_.find(key) != key_shm_addr_.end()) {
       return key_shm_addr_[key];
     }
@@ -896,9 +895,7 @@ class RDMAVan : public Van {
     } else { // data message
       msg_buf->inline_len = meta_len;
       msg_buf->inline_buf = mempool_->Alloc(meta_len);
-      if (!is_local_[remote_id]) {
-        msg_buf->data = msg.data;
-      }
+      msg_buf->data = msg.data;
       meta.SerializeToArray(msg_buf->inline_buf, meta_len);
       if (!is_server_ && !is_local_[remote_id]) { // worker, send to non-local servers
         for (auto &sa : msg_buf->data) {
@@ -979,16 +976,14 @@ class RDMAVan : public Van {
       msg_buf->reserved_context = reserved;
       
       auto key = DecodeKey(msg.data[0]);
-      LOG(INFO) << "send key=" << key;
       CHECK_EQ(key, msg.meta.key);
       
       RendezvousIPC *req =
           reinterpret_cast<RendezvousIPC *>(context->buffer->addr);
       req->key = key;
-      req->len = data_len;
       req->origin_addr = reinterpret_cast<uint64_t>(msg_buf);
       req->meta_len = meta_len;
-
+      req->data_num = 0;
       auto addr = reinterpret_cast<uint64_t>(req);
       SendRendezvousBegin(endpoint, addr, context, kRendezvousIPC);
     } else { 
@@ -1001,11 +996,10 @@ class RDMAVan : public Van {
       RendezvousStart *req =
           reinterpret_cast<RendezvousStart *>(context->buffer->addr);
       req->meta_len = meta_len;
-
-      for (size_t i = 0; i < msg.data.size(); ++i) {
+      req->data_num = msg.data.size();
+      for (size_t i = 0; i < req->data_num; ++i) {
         req->data_len[i] = msg.data[i].size();
       }
-      req->data_num = msg.data.size();
       req->origin_addr = reinterpret_cast<uint64_t>(msg_buf);
 
       auto addr = reinterpret_cast<uint64_t>(req);
@@ -1039,25 +1033,40 @@ class RDMAVan : public Van {
     if (is_server_ && IsValidPushpull(*msg) && is_local_[msg->meta.sender]) {
       // get data message from local shared memory
       auto key = msg->meta.key;
-      auto len = msg->meta.val_len;
 
       std::lock_guard<std::mutex> lock(map_mu_);
-      CHECK_NE(key_addr_map_.find(key), key_addr_map_.end()) << key;
-      CHECK_NE(key_len_map_.find(key), key_len_map_.end());
+      if (key_addr_map_.find(key) == key_addr_map_.end()) {
+        key_addr_map_[key] = key;
+      }
 
       SArray<char> keys;
       SArray<char> vals;
       SArray<char> lens;
-      void* addr = GetSharedMemory(kShmPrefix, key, len);
       keys.reset(reinterpret_cast<char*>(&key_addr_map_[key]), sizeof(ps::Key), [](void *){});
-      vals.reset(reinterpret_cast<char*>(addr), len, [](void *){});
-      lens.reset(reinterpret_cast<char*>(&key_len_map_[key]), sizeof(int), [](void *){});
-
       msg->data.push_back(keys);
-      msg->data.push_back(vals);
-      msg->data.push_back(lens);
+      total_len += keys.size();
+
+      LOG(INFO) << "== server recv IPC msg: key=" << key 
+                << " (" << (msg->meta.push ? "push" : "pull") << ")";
+
+      if (msg->meta.push && msg->meta.request) { // push request
+        auto len = msg->meta.val_len;
+        if (key_len_map_.find(key) == key_len_map_.end()) {
+          key_len_map_[key] = len;
+        }
+        CHECK_EQ(len, key_len_map_[key]) << "key=" << key 
+            << ": " << len << ", " << key_len_map_[key];
       
-      total_len += keys.size() + vals.size() + lens.size();
+        void* addr = GetSharedMemory(kShmPrefix, key, len);
+        vals.reset(reinterpret_cast<char*>(addr), len, [](void *){});
+        lens.reset(reinterpret_cast<char*>(&key_len_map_[key]), sizeof(int), [](void *){});
+        msg->data.push_back(vals);
+        msg->data.push_back(lens);
+      } else {
+        msg->data.push_back(vals);
+      }
+      total_len += vals.size() + lens.size();
+
       mempool_->Free(buffer_ctx->buffer);
       is_released = true;
     }
@@ -1107,8 +1116,7 @@ class RDMAVan : public Van {
         total_len += len;
       }
     } else {
-      if (!is_released)
-      mempool_->Free(buffer_ctx->buffer);
+      if (!is_released) mempool_->Free(buffer_ctx->buffer);
     }
 
     if (msg->meta.push && msg->meta.request) { // server
@@ -1287,26 +1295,20 @@ class RDMAVan : public Van {
 
               SendRendezvousReply(endpoint, buf_ctx, req->origin_addr);
             } else if (imm == kRendezvousIPC) { 
-              LOG(INFO) << "kRendezvousIPC";
               RendezvousIPC *req =
                   reinterpret_cast<RendezvousIPC *>(mr->addr);
-              auto key = req->key;
-              auto len = req->len;
+              LOG(INFO) << (is_server_ ? "server" : "worker") 
+                  << " receive kRendezvousIPC with key=" << req->key;
 
               BufferContext *buf_ctx = new BufferContext();
               buf_ctx->meta_len = req->meta_len;
               buf_ctx->data_num = 0;
+
               char *buffer = mempool_->Alloc(req->meta_len);
-              CHECK(buffer) << req->meta_len;
+              CHECK(buffer);
               buf_ctx->buffer = buffer;
 
               SendRendezvousReply(endpoint, buf_ctx, req->origin_addr);
-
-              std::lock_guard<std::mutex> lock(map_mu_);
-              if (key_len_map_.find(key) == key_len_map_.end()) {
-                key_addr_map_[key] = key;
-                key_len_map_[key] = len;
-              }
             } else if (imm == kRendezvousReply) {
               // LOG(INFO) << "opcode: IBV_WC_RECV kRendezvousReply";
               RendezvousReply *resp =
