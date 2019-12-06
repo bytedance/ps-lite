@@ -728,7 +728,7 @@ class RDMAVan : public Van {
     auto base_key = worker_key - seq_num;
     uint64_t offset = byteps_partition_bytes_ * seq_num;
     if (key_shm_addr_.find(base_key) != key_shm_addr_.end()) {
-      return (void*) ((uint64_t*) key_shm_addr_[base_key] + offset);
+      return key_shm_addr_[base_key] + offset;
     }
     std::string shm_name(prefix);
     shm_name += std::to_string(base_key);
@@ -746,7 +746,7 @@ class RDMAVan : public Van {
     LOG(INFO) << "open Shared Memory: " << shm_name
               << ", offset=" << offset 
               << ", (in bytes) size=" << total_shm_size;
-    return (void*) ((uint64_t*) key_shm_addr_[base_key] + offset);
+    return key_shm_addr_[base_key] + offset;
   }
 
   void SendRendezvousBegin(Endpoint* endpoint, 
