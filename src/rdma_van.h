@@ -524,17 +524,20 @@ class RDMAVan : public Van {
     if (enable_rdma_log_) LOG(INFO) << "Enable RDMA logging";
     else LOG(INFO) << "You can enable RDMA logging with ENABLE_RDMA_LOG=1";
 
+    val = Environment::Get()->find("BYTEPS_ENABLE_IPC");
+    disable_ipc_ = val ? !atoi(val) : true;
+    if (disable_ipc_) LOG(INFO) << "Shared memory IPC has been disabled";
+
     val = Environment::Get()->find("BYTEPS_PARTITION_BYTES");
     byteps_partition_bytes_ = val ? atoi(val) : 4096000;
 
     val = Environment::Get()->find("BYTEPS_LOCAL_SIZE");
     auto byteps_local_size = val ? atoi(val) : 1;
     byteps_partition_bytes_ = AlignTo(byteps_partition_bytes_, (8 * byteps_local_size));
-    LOG(INFO) << "partition bytes set to " << byteps_partition_bytes_ << ", should be identical with byteps core";
-
-    val = Environment::Get()->find("BYTEPS_ENABLE_IPC");
-    disable_ipc_ = val ? !atoi(val) : true;
-    if (disable_ipc_) LOG(INFO) << "Shared memory IPC has been disabled";
+    if (!disable_ipc_) {
+      CHECK(val) << "BYTEPS_LOCAL_SIZE not set";
+      LOG(INFO) << "partition bytes set to " << byteps_partition_bytes_ << ", should be identical with byteps core";
+    }
 
     if (event_channel_ == nullptr) {
       event_channel_ = rdma_create_event_channel();
