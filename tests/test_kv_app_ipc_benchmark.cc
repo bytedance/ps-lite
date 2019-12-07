@@ -17,7 +17,8 @@ enum MODE {
     PUSH_PULL_MIX_ENDLESS = 1
 };
 std::unordered_map<uint64_t, KVPairs<DATA_TYPE> > mem_map;
-
+std::unordered_map<std::string, void *> _key_shm_addr;
+std::unordered_map<std::string, size_t> _key_shm_size;
 
 void* OpenSharedMemory(const std::string& prefix,
                                            uint64_t key, size_t size) {
@@ -33,6 +34,8 @@ void* OpenSharedMemory(const std::string& prefix,
   CHECK_NE(ptr, (void*)-1) << strerror(errno);
 
   LOG(INFO) << "initialized share memory size=" << size << " for key=" << key;
+  _key_shm_addr[shm_name] = ptr;
+  _key_shm_size[shm_name] = size;
   return ptr;
 }
 
@@ -86,7 +89,12 @@ void RunWorker(int argc, char *argv[]) {
   CHECK_GT(num_servers, 0);
 
   // init
+  auto val = Environment::Get()->find("BYTEPS_PARTITION_BYTES");
+  unsigned int partition_bytes = val ? atoi(val) : 4096000;
   int len = atoi(argv[1]);
+  CHECK_GE(partition_bytes, len) 
+      << "tensor partition is not supported in this benchmark"
+      << ", try reduce tensor size or increase BYTEPS_PARTITION_BYTES";
   int repeat = atoi(argv[2]);
   MODE mode = (argc > 3) ? static_cast<MODE>(atoi(argv[3])) : PUSH_PULL_MIX_ENDLESS;
 
@@ -199,19 +207,17 @@ void RunWorker(int argc, char *argv[]) {
             }
           }
         }
-      }
-      break;
-
+      } break;
     default:
       CHECK(0) << "unknown mode " << mode;
   }
-
-
 }
 
 int main(int argc, char *argv[]) {
   // disable multi-threaded processing first
   setenv("ENABLE_SERVER_MULTIPULL", "0", 1);
+  setenv("BYTEPS_LOCAL_SIZE", "1", 1);
+  setenv("BYTEPS_ENABLE_IPC", "1", 0);
   // start system
   Start(0);
   // setup server nodes
@@ -219,6 +225,11 @@ int main(int argc, char *argv[]) {
   // run worker nodes
   RunWorker(argc, argv);
   // stop system
-  Finalize(0, true);
+  Finalize(0, true);    
+  // release shm
+  for (auto &it : _key_shm_addr) {
+    munmap(it.second, _key_shm_size[it.first]);
+    shm_unlink(it.first.c_str());
+  }
   return 0;
 }
