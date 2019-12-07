@@ -808,8 +808,8 @@ class RDMAVan : public Van {
     while (true) {
       AsyncCopy m;
       q->WaitAndPop(&m);
-      if (m.len == 0) continue;
       if (m.shutdown) break;
+      if (m.len == 0) continue;
 
       // TODO: use parallel copy      
       memcpy(m.dst, m.src, m.len);
