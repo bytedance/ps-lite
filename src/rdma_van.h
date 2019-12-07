@@ -486,6 +486,7 @@ struct AsyncCopy {
   void* src;
   int len;
   uint64_t meta_len;
+  bool shutdown;
 };
 
 class RDMAVan : public Van {
@@ -527,7 +528,7 @@ class RDMAVan : public Van {
     }
 
     val = Environment::Get()->find("BYTEPS_IPC_COPY_NUM_THREADS");
-    ipc_copy_nthreads_ = val ? atoi(val) : 1;
+    ipc_copy_nthreads_ = val ? atoi(val) : 4;
     if (!disable_ipc_) {
       LOG(INFO) << "IPC async copy nthreads set to " << ipc_copy_nthreads_;
       for (int i = 0; i < ipc_copy_nthreads_; ++i) {
@@ -586,6 +587,9 @@ class RDMAVan : public Van {
         << "Failed to destroy channel";
     
     for (size_t i = 0; i < ipc_copy_thread_list_.size(); ++i) {
+      AsyncCopy m;
+      m.shutdown = true;
+      async_copy_queue_[i]->Push(m);
       ipc_copy_thread_list_[i]->join();
     }
 
@@ -804,8 +808,8 @@ class RDMAVan : public Van {
     while (true) {
       AsyncCopy m;
       q->WaitAndPop(&m);
-      // do check
       if (m.len == 0) continue;
+      if (m.shutdown) break;
 
       // TODO: use parallel copy      
       memcpy(m.dst, m.src, m.len);
@@ -961,7 +965,7 @@ class RDMAVan : public Van {
         CHECK(addr);
         void* shm_addr = GetSharedMemory(kShmPrefix, key);
         // async copy
-        AsyncCopy m = {endpoint, msg_buf, shm_addr, addr, len, meta_len};
+        AsyncCopy m = {endpoint, msg_buf, shm_addr, addr, len, meta_len, false};
         auto cnt = cpy_counter_.fetch_add(1);
         async_copy_queue_[cnt % ipc_copy_nthreads_]->Push(m);
         return total_len;
