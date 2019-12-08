@@ -812,6 +812,8 @@ class RDMAVan : public Van {
       if (m.len == 0) continue;
 
       // TODO: use parallel copy      
+      CHECK(m.dst);
+      CHECK(m.src);
       memcpy(m.dst, m.src, m.len);
 
       WRContext *context = nullptr, *reserved = nullptr;
@@ -870,6 +872,7 @@ class RDMAVan : public Van {
           if (enable_rdma_log_) {
             LOG(INFO) << "send push key=" << key
                     << ", val_len=" << msg.meta.val_len
+                    << ", recver=" << msg.meta.recver
                     << ", val_addr=" << msg.meta.addr
                     << ", rkey=" << msg.meta.option;
           }
@@ -964,6 +967,7 @@ class RDMAVan : public Van {
         auto addr = (void*) msg_buf->data[1].data();
         CHECK(addr);
         void* shm_addr = GetSharedMemory(kShmPrefix, key);
+        
         // async copy
         AsyncCopy m = {endpoint, msg_buf, shm_addr, addr, len, meta_len, false};
         auto cnt = cpy_counter_.fetch_add(1);

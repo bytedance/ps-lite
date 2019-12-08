@@ -19,6 +19,8 @@ enum MODE {
 std::unordered_map<uint64_t, KVPairs<DATA_TYPE> > mem_map;
 std::unordered_map<std::string, void *> _key_shm_addr;
 std::unordered_map<std::string, size_t> _key_shm_size;
+std::unordered_map<uint64_t, char*> store_;
+std::mutex mu_;
 
 void* OpenSharedMemory(const std::string& prefix,
                                            uint64_t key, size_t size) {
@@ -26,22 +28,27 @@ void* OpenSharedMemory(const std::string& prefix,
   shm_name += std::to_string(key);
   int shm_fd = shm_open(shm_name.c_str(), O_CREAT | O_RDWR, 0666);
   CHECK_GE(shm_fd, 0) << "shm_open failed for " << shm_name;
-
   CHECK_GE(ftruncate(shm_fd, size), 0) << strerror(errno);
 
   void* ptr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-
   CHECK_NE(ptr, (void*)-1) << strerror(errno);
 
-  LOG(INFO) << "initialized share memory size=" << size << " for key=" << key;
+  LOG(INFO) << "initialized share memory size=" << size 
+            << " for key=" << key << ", name=" << shm_name;
   _key_shm_addr[shm_name] = ptr;
   _key_shm_size[shm_name] = size;
   return ptr;
 }
 
+uint64_t DecodeKey(ps::Key key) {
+  auto kr = ps::Postoffice::Get()->GetServerKeyRanges()[ps::MyRank()];
+  return key - kr.begin();
+}
+
 template <typename Val>
 void EmptyHandler(const KVMeta &req_meta, const KVPairs<Val> &req_data, KVServer<Val> *server) {
-  uint64_t key = req_data.keys[0];
+  std::lock_guard<std::mutex> lk(mu_);
+  uint64_t key = DecodeKey(req_data.keys[0]);
   if (req_meta.push) {
     CHECK(req_data.lens.size());
     CHECK_EQ(req_data.vals.size(), (size_t)req_data.lens[0]);
@@ -50,15 +57,16 @@ void EmptyHandler(const KVMeta &req_meta, const KVPairs<Val> &req_data, KVServer
       PS_VLOG(1) << "key " << key << " from worker-" << req_meta.sender;
       size_t len = (size_t) req_data.vals.size();
       mem_map[key].keys.push_back(key);
-      mem_map[key].vals.CopyFrom(req_data.vals);
       mem_map[key].lens.push_back(len);
+
+      store_[key] = (char*) malloc(len);
+      mem_map[key].vals = ps::SArray<char>(store_[key], len, false);
     }
 
     // send push response (empty)
     KVPairs<DATA_TYPE> res;
     server->Response(req_meta, res);
-  }
-  else {
+  } else { // pull request
     auto iter = mem_map.find(key);
     CHECK_NE(iter, mem_map.end());
     server->Response(req_meta, iter->second);
@@ -77,6 +85,10 @@ struct PSKV {
   SArray<int> lens;      // the length of the i-th value
 };
 std::unordered_map<uint64_t, PSKV> ps_kv_;
+
+uint64_t EncodeKey(uint64_t seed) {
+  return seed << 16;
+}
 
 void RunWorker(int argc, char *argv[]) {
   if (!IsWorker()) return;
@@ -100,7 +112,7 @@ void RunWorker(int argc, char *argv[]) {
 
   std::vector<SArray<DATA_TYPE> > server_vals;
   for (int server = 0; server < num_servers; server++) {
-    auto key = server; 
+    auto key = EncodeKey(server); 
     auto addr = (char*) OpenSharedMemory(std::string("BytePS_ShM_"), key, len);
     SArray<DATA_TYPE> vals(addr, len, false);
     server_vals.push_back(vals);
@@ -108,7 +120,7 @@ void RunWorker(int argc, char *argv[]) {
 
   // init broadcast
   for (int server = 0; server < num_servers; server++) {
-    int key = server; // could be other value
+    auto key = EncodeKey(server); 
     auto vals = server_vals[server];
     PSKV& pskv = ps_kv_[key];
     SArray<Key> keys;
@@ -130,7 +142,7 @@ void RunWorker(int argc, char *argv[]) {
         for (int i = 0; i < repeat; ++i) {
           auto start = std::chrono::high_resolution_clock::now();
           for (int server = 0; server < num_servers; server++) {
-            int key = server;
+            auto key = EncodeKey(server);
             PSKV& pskv = ps_kv_[key];
             auto keys = pskv.keys;
             auto lens = pskv.lens;
@@ -151,7 +163,7 @@ void RunWorker(int argc, char *argv[]) {
         for (int i = 0; i < repeat; ++i) {
           auto start = std::chrono::high_resolution_clock::now();
           for (int server = 0; server < num_servers; server++) {
-            int key = server;
+            auto key = EncodeKey(server);
             PSKV& pskv = ps_kv_[key];
             auto keys = pskv.keys;
             auto lens = pskv.lens;
@@ -182,12 +194,11 @@ void RunWorker(int argc, char *argv[]) {
         int cnt = 0;
         while (1) {
           for (int server = 0; server < num_servers; server++) {
-            int key = server;
+            auto key = EncodeKey(server);
             PSKV& pskv = ps_kv_[key];
             auto keys = pskv.keys;
             auto lens = pskv.lens;
             auto vals = server_vals[server];
-
             timestamp_list.push_back(kv.ZPush(keys, vals, lens));
             timestamp_list.push_back(kv.ZPull(keys, &vals, &lens));
           }
