@@ -55,16 +55,16 @@ namespace ps {
 #define ROUNDUP(x, y) (DIVUP((x), (y))*(y))
 
 static const int kStartDepth = 128;
-static const int kWriteDepth = kStartDepth;
 
-static const int kRxDepth = kStartDepth + kWriteDepth;
+// must be larger than kStartDepth
+static const int kRxDepth = 2048; 
 static const int kReplyDepth = kRxDepth;
 
 static const int kSGEntry = 1;
 static const int kTimeoutms = 1000;
 static const int kRdmaListenBacklog = 128;
 static const int kMaxConcurrentWorkRequest =
-    kRxDepth + kStartDepth + kReplyDepth + kWriteDepth;
+    kRxDepth + kStartDepth + kReplyDepth;
 static const int kMaxHostnameLength = 16;
 static const int kMaxDataFields = 4;
 
