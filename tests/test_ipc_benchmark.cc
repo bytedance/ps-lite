@@ -235,7 +235,7 @@ void RunWorker(int argc, char *argv[]) {
 
   for (int i = 0; i < num_servers; ++i) {
     PS_VLOG(1) << "server-" << i 
-        << " load is " << (1.0 * accumulated_key_num[i] / total_key_num)
+        << " load is " << (100.0 * accumulated_key_num[i] / total_key_num)
         << "%";
   }
 
