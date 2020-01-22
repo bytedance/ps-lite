@@ -200,9 +200,12 @@ void RunWorker(int argc, char *argv[]) {
     server_vals.push_back(vals);
   }
 
+  std::unordered_map<int, size_t> accumulated_key_num;
   // init push, do not count this into time cost
   for (int i = 0; i < total_key_num; i++) {
     int server = AllocateServer(i, total_key_num);
+    accumulated_key_num[server] += 1;
+
     auto vals = server_vals[i];
 
     auto key = EncodeKey(i);
@@ -228,6 +231,12 @@ void RunWorker(int argc, char *argv[]) {
     server_lens.push_back(lens);
 
     kv.Wait(kv.ZPush(keys, vals, lens));
+  }
+
+  for (int i = 0; i < num_servers; ++i) {
+    PS_VLOG(1) << "server-" << i 
+        << " load is " << (1.0 * accumulated_key_num[i] / total_key_num)
+        << "%";
   }
 
   push_pull(kv, server_keys, server_vals, server_lens, len, num_servers, total_key_num, how_many_key_per_server, mode);
