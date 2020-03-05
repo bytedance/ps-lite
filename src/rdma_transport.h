@@ -480,7 +480,7 @@ class IPCTransport : public RDMATransport {
     if (byteps_local_size > byteps_nccl_pcie_size) {
       // cross pcie switch, use the last pcie cpu buffer
       auto byteps_pcie_num = byteps_local_size / byteps_nccl_pcie_size;
-      shm_prefix_ = kShmPciePrefix + std::to_string(byteps_pcie_num) + "_Shm_";
+      shm_prefix_ = kShmPciePrefix + std::to_string(byteps_pcie_num - 1) + "_Shm_";
     } else {
       shm_prefix_ = kShmPrefix;
     }
