@@ -47,13 +47,13 @@ struct Endpoint {
   Endpoint() : status(IDLE), node_id(Node::kEmpty), cm_id(nullptr), rx_ctx() {
     auto byteps_rx_depth = Environment::Get()->find("BYTEPS_RDMA_RX_DEPTH");
     auto byteps_start_depth = Environment::Get()->find("BYTEPS_RDMA_START_DEPTH");
-    auto byteps_reply_depth = Environment::Get()->find("BYTEPS_RDMA_REPLY_DEPTH");
-    kStartDepth = byteps_rx_depth ? atoi(byteps_rx_depth) : kStartDepth;
-    kRxDepth = byteps_rx_depth ? atoi(byteps_start_depth) : kRxDepth;
-    kReplyDepth = byteps_rx_depth ? atoi(byteps_reply_depth) : kReplyDepth;
-    rx_ctx = new WRContext[kRxDepth];
+    kStartDepth = byteps_start_depth ? atoi(byteps_start_depth) : kStartDepth;
+    kRxDepth = byteps_rx_depth ? atoi(byteps_rx_depth) : kRxDepth;
+    kReplyDepth = kRxDepth;
+
     start_ctx = new WRContext[kStartDepth];
     reply_ctx = new WRContext[kReplyDepth];
+    rx_ctx = new WRContext[kRxDepth];
   }
 
   ~Endpoint() {

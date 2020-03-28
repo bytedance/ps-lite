@@ -58,12 +58,11 @@ class RDMAVan : public Van {
       kMaxConcurrentWorkRequest = atoi(val);
 
       auto start_depth_env = Environment::Get()->find("BYTEPS_RDMA_START_DEPTH");
-      auto reply_depth_env = Environment::Get()->find("BYTEPS_RDMA_REPLY_DEPTH");
       auto rx_depth_env = Environment::Get()->find("BYTEPS_RDMA_RX_DEPTH");
 
       auto start_depth = start_depth_env ? atoi(start_depth_env) : 128;
-      auto reply_depth = start_depth_env ? atoi(reply_depth_env) : 2048;
-      auto rx_depth = start_depth_env ? atoi(rx_depth_env) : 2048;
+      auto rx_depth = rx_depth_env ? atoi(rx_depth_env) : 2048;
+      auto reply_depth = rx_depth;
 
       CHECK_GE(kMaxConcurrentWorkRequest, start_depth + reply_depth + rx_depth) 
           << "Should make sure: kMaxConcurrentWorkRequest >= kStartDepth + kReplyDepth + kRxDepth";
