@@ -104,7 +104,9 @@ struct Endpoint {
       ib_malloc((void**) &buf, kMempoolChunkSize);
       CHECK(buf);
       struct ibv_mr *mr = ibv_reg_mr(pd, buf, kMempoolChunkSize, 0);
-      CHECK(mr);
+      CHECK(mr) << "ibv_reg_mr failed: " << strerror(errno) 
+          << "\nYou can try to reduce BYTEPS_RDMA_START_DEPTH (default 128)"
+          << " or BYTEPS_RDMA_RX_DEPTH (default 2048)";
 
       ctx[i].type = type;
       ctx[i].buffer = mr;
@@ -139,9 +141,9 @@ struct Endpoint {
       CHECK(buf);
       struct ibv_mr *mr =
           ibv_reg_mr(pd, buf, kMempoolChunkSize, IBV_ACCESS_LOCAL_WRITE);
-      CHECK(mr)<< "ibv_reg_mr failed: " << strerror(errno)
-               << ", i=" << i 
-               << ", kMempoolChunkSize=" << kMempoolChunkSize;
+      CHECK(mr) << "ibv_reg_mr failed: " << strerror(errno) 
+          << "\nYou can try to reduce BYTEPS_RDMA_START_DEPTH (default 128)"
+          << " or BYTEPS_RDMA_RX_DEPTH (default 2048)";
 
       rx_ctx[i].type = kReceiveContext;
       rx_ctx[i].buffer = mr;
