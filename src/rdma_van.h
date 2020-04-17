@@ -457,7 +457,6 @@ class RDMAVan : public Van {
     CHECK_NE(tensor_info_map_.find(key), tensor_info_map_.end());
     CHECK_NE(tensor_info_map_[key].find(recver), tensor_info_map_[key].end());
     msg.meta.val_len = std::get<0>(tensor_info_map_[key][recver]);
-    // msg.meta.addr = std::get<1>(tensor_info_map_[key][recver]);
     msg.meta.option = std::get<2>(tensor_info_map_[key][recver]);
   }
 

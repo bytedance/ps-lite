@@ -653,7 +653,9 @@ int KVWorker<Val>::Pull_(
       if (cb) cb();
     });
 
-  KVPairs<Val> kvs; kvs.keys = keys;
+  KVPairs<Val> kvs; 
+  kvs.keys = keys;
+  kvs.vals = *vals;
   Send(ts, false, cmd, kvs);
   return ts;
 }
