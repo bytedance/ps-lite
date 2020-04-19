@@ -17,7 +17,8 @@ enum MODE {
     PUSH_ONLY = 2, 
     PULL_ONLY = 3
 };
-std::unordered_map<uint64_t, KVPairs<char> > mem_map;
+std::unordered_map<uint64_t, KVPairs<char> > mem_map_push;
+std::unordered_map<uint64_t, KVPairs<char> > mem_map_pull;
 bool debug_mode_ = false;
 
 void aligned_memory_alloc(void** ptr, size_t size) {
@@ -46,33 +47,32 @@ void EmptyHandler(const KVMeta &req_meta, const KVPairs<Val> &req_data, KVServer
     CHECK_EQ(req_data.vals.size(), (size_t)req_data.lens[0]) 
         << "key=" << key << ", " << req_data.vals.size() << ", " << req_data.lens[0];
 
-
-    if (mem_map.find(key) == mem_map.end()) {
+    if (mem_map_push.find(key) == mem_map_push.end()) {
       size_t len = (size_t) req_data.vals.size();
 
       void* ptr_val;
       aligned_memory_alloc(&ptr_val, len);  
-      mem_map[key].vals.reset((char*)ptr_val, len, [](void *){ });
+      mem_map_push[key].vals.reset((char*)ptr_val, len, [](void *){ });
 
       void* ptr_key;
       aligned_memory_alloc(&ptr_key, sizeof(Key));  
-      mem_map[key].keys.reset((Key*)ptr_key, 1, [](void *){ });
+      mem_map_push[key].keys.reset((Key*)ptr_key, 1, [](void *){ });
       memcpy(ptr_key, &key, sizeof(Key));
 
       void* ptr_len;
       aligned_memory_alloc(&ptr_len, sizeof(int));  
-      mem_map[key].lens.reset((int*)ptr_len, 1, [](void *){ });
+      mem_map_push[key].lens.reset((int*)ptr_len, 1, [](void *){ });
       memcpy(ptr_len, &len, sizeof(int));
     }
 
     auto recved = reinterpret_cast<char*>(req_data.vals.data());
     // only sum the first 4 bytes
     size_t sum_len = debug_mode_ ? req_data.vals.size() : 0;
-    float_sum((float*) mem_map[key].vals.data(), (float*) recved, sum_len);
+    float_sum((float*) mem_map_push[key].vals.data(), (float*) recved, sum_len);
 
     if (debug_mode_) {
       LOG(INFO) << "recved tensor! key=" << key << "\t"
-          << "store: " << DEBUG_PRINT_TENSOR_VALUE(mem_map[key].vals.data()) << "\t"
+          << "store: " << DEBUG_PRINT_TENSOR_VALUE(mem_map_push[key].vals.data()) << "\t"
           << "recv: " << DEBUG_PRINT_TENSOR_VALUE(recved) << "\t"
           << "address: " << DEBUG_PRINT_TENSOR_ADDRESS(recved) << "\t"
           << "len: " << req_data.vals.size() << "\t"
@@ -82,11 +82,26 @@ void EmptyHandler(const KVMeta &req_meta, const KVPairs<Val> &req_data, KVServer
     // send push response (empty)
     KVPairs<char> res;
     server->Response(req_meta, res);
-  }
-  else {
-    auto iter = mem_map.find(key);
-    CHECK_NE(iter, mem_map.end());
-    server->Response(req_meta, iter->second);
+  } else { // pull 
+    auto iter = mem_map_pull.find(key);
+    if (iter == mem_map_pull.end()) {
+      size_t len = (size_t) req_meta.val_len;
+      LOG(INFO) << "len=" << len;
+      void* ptr_val;
+      aligned_memory_alloc(&ptr_val, len);  
+      mem_map_pull[key].vals.reset((char*)ptr_val, len, [](void *){ });
+
+      void* ptr_key;
+      aligned_memory_alloc(&ptr_key, sizeof(Key));  
+      mem_map_pull[key].keys.reset((Key*)ptr_key, 1, [](void *){ });
+      memcpy(ptr_key, &key, sizeof(Key));
+
+      void* ptr_len;
+      aligned_memory_alloc(&ptr_len, sizeof(int));  
+      mem_map_pull[key].lens.reset((int*)ptr_len, 1, [](void *){ });
+      memcpy(ptr_len, &len, sizeof(int));
+    }
+    server->Response(req_meta, mem_map_pull[key]);
   }
 }
 
@@ -192,8 +207,9 @@ void RunWorker(int argc, char *argv[]) {
 
   // init
   int len = (argc > 1) ? atoi(argv[1]) : 1024000;
-  int repeat = (argc > 2) ? atoi(argv[2]) : 10;
-  MODE mode = (argc > 3) ? static_cast<MODE>(atoi(argv[3])) : PUSH_PULL;
+  int len_pull = (argc > 2) ? atoi(argv[2]) : 512000;
+  int repeat = (argc > 3) ? atoi(argv[3]) : 10;
+  MODE mode = (argc > 4) ? static_cast<MODE>(atoi(argv[4])) : PUSH_THEN_PULL;
 
   auto v = Environment::Get()->find("NUM_KEY_PER_SERVER");
   const int how_many_key_per_server = v ? atoi(v) : 40;
@@ -204,7 +220,7 @@ void RunWorker(int argc, char *argv[]) {
   std::vector<SArray<Key> > server_keys;
   std::vector<SArray<int> > server_lens;
   CreateSarrayVector(server_vals, len, total_key_num);
-  CreateSarrayVector(server_vals_pull, len, total_key_num);
+  CreateSarrayVector(server_vals_pull, len_pull, total_key_num);
 
   // init push, do not count this into time cost
   for (int key = 0; key < total_key_num; key++) {
@@ -270,7 +286,7 @@ void RunWorker(int argc, char *argv[]) {
         accumulated_ms += (end - start).count(); // ns
       }
 
-      LL << "pull " << len * sizeof(char)
+      LL << "pull " << len_pull * sizeof(char)
           << " bytes to each server, repeat=" << repeat
           << ", total_time="
           << accumulated_ms / 1e6 << "ms";
