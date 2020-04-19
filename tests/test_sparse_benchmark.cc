@@ -119,21 +119,24 @@ void push_pull(KVWorker<char> &kv,
                std::vector<SArray<char> > &server_vals, 
                std::vector<SArray<char> > &server_vals_pull, 
                std::vector<SArray<int> > &server_lens,
-               int len, int num_servers, int total_key_num, 
+               int len, int len_pull,
+               int num_servers, int total_key_num, 
                int how_many_key_per_server, MODE mode) {
+  auto valid_len = len > len_pull ? len : len_pull;
+
   CHECK_GT(mode, 0);
   switch (mode) {
     case PUSH_PULL: // 0
       LOG(INFO) << "========= PUSH_PULL mode =========";
-      LOG(INFO) << "========= msg_size=" << len*sizeof(char) << " bytes =========";
+      LOG(INFO) << "========= msg_size=" << valid_len * sizeof(char) << " bytes =========";
       break;
     case PUSH_ONLY: // 1
       LOG(INFO) << "========= PUSH_ONLY mode =========";
-      LOG(INFO) << "========= msg_size=" << len*sizeof(char) << " bytes =========";
+      LOG(INFO) << "========= msg_size=" << valid_len * sizeof(char) << " bytes =========";
        break;
     case PULL_ONLY: // 2
       LOG(INFO) << "========= PULL_ONLY mode =========";
-      LOG(INFO) << "========= msg_size=" << len*sizeof(char) << " bytes =========";
+      LOG(INFO) << "========= msg_size=" << valid_len * sizeof(char) << " bytes =========";
       break;
     default: CHECK(0);
   }
@@ -179,7 +182,7 @@ void push_pull(KVWorker<char> &kv,
 
     end = std::chrono::high_resolution_clock::now();
     LL << "Application goodput: " 
-        << 8.0 * len * sizeof(char) * total_key_num * cnt / (end - start).count() 
+        << 8.0 * valid_len * sizeof(char) * total_key_num * cnt / (end - start).count() 
         << " Gbps";
     cnt = 0;
     start = std::chrono::high_resolution_clock::now();
@@ -294,7 +297,7 @@ void RunWorker(int argc, char *argv[]) {
     case PUSH_PULL: 
     case PUSH_ONLY: 
     case PULL_ONLY: 
-      push_pull(kv, server_keys, server_vals, server_vals_pull, server_lens, len, num_servers, total_key_num, how_many_key_per_server, mode);
+      push_pull(kv, server_keys, server_vals, server_vals_pull, server_lens, len, len_pull, num_servers, total_key_num, how_many_key_per_server, mode);
       break;
     default:
       CHECK(0) << "unknown mode " << mode;
