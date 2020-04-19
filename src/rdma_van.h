@@ -556,18 +556,7 @@ class RDMAVan : public Van {
     if (msg.meta.request) {
       msg.meta.key = DecodeKey(msg.data[0]);
     }
-    if (msg.meta.push && msg.meta.request) { 
-      // push request
-      CHECK_EQ(msg.data.size(), 3) << msg.data.size();
-
-      std::lock_guard<std::mutex> lock(map_mu_);
-      CHECK_NE(mem_mr_.find(msg.data[1].data()), mem_mr_.end());
-
-      auto& vals = msg.data[1];
-      msg.meta.addr = reinterpret_cast<uint64_t>(vals.data()); // vals address
-      msg.meta.val_len = vals.size();
-      msg.meta.option = mem_mr_[vals.data()]->rkey;
-    } else if (!msg.meta.push && msg.meta.request) { 
+    if (!msg.meta.push && msg.meta.request) { 
       // pull request 
       std::lock_guard<std::mutex> lock(map_mu_);
       auto val_addr = reinterpret_cast<char*>(msg.meta.addr);
