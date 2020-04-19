@@ -270,7 +270,7 @@ class KVWorker : public SimpleApp {
    * @param push whether or not it is a push request
    * @param cmd command
    */
-  void Send(int timestamp, bool push, int cmd, const KVPairs<Val>& kvs);
+  void Send(int timestamp, bool push, int cmd, KVPairs<Val>& kvs);
   /** \brief internal receive handle */
   void Process(const Message& msg);
   /** \brief default kv slicer */
@@ -306,6 +306,10 @@ struct KVMeta {
   Key key;
   /** \brief the tensor address */
   uint64_t addr;
+  /** \brief the value length */
+  int val_len;
+  /** \brief the option */
+  int option;
 };
 
 /**
@@ -415,6 +419,8 @@ void KVServer<Val>::Process(const Message& msg) {
   meta.customer_id = msg.meta.customer_id;
   meta.key       = msg.meta.key;
   meta.addr      = msg.meta.addr;
+  meta.val_len   = msg.meta.val_len;
+  meta.option    = msg.meta.option;
 
   KVPairs<Val> data;
   int n = msg.data.size();
@@ -445,6 +451,8 @@ void KVServer<Val>::Response(const KVMeta& req, const KVPairs<Val>& res) {
   msg.meta.recver      = req.sender;
   msg.meta.key         = req.key;
   msg.meta.addr        = req.addr;
+  msg.meta.val_len     = req.val_len;
+  msg.meta.option      = req.option;
   if (res.keys.size()) {
     msg.AddData(res.keys);
     msg.AddData(res.vals);
@@ -513,7 +521,7 @@ void KVWorker<Val>::DefaultSlicer(
 }
 
 template <typename Val>
-void KVWorker<Val>::Send(int timestamp, bool push, int cmd, const KVPairs<Val>& kvs) {
+void KVWorker<Val>::Send(int timestamp, bool push, int cmd, KVPairs<Val>& kvs) {
   // slice the message
   SlicedKVs sliced;
   slicer_(kvs, Postoffice::Get()->GetServerKeyRanges(), &sliced);
@@ -528,7 +536,7 @@ void KVWorker<Val>::Send(int timestamp, bool push, int cmd, const KVPairs<Val>& 
     RunCallback(timestamp);
   }
   for (size_t i = 0; i < sliced.size(); ++i) {
-    const auto& s = sliced[i];
+    auto& s = sliced[i];
     if (!s.first) continue;
     Message msg;
     msg.meta.app_id = obj_->app_id();
@@ -538,7 +546,10 @@ void KVWorker<Val>::Send(int timestamp, bool push, int cmd, const KVPairs<Val>& 
     msg.meta.head        = cmd;
     msg.meta.timestamp   = timestamp;
     msg.meta.recver      = Postoffice::Get()->ServerRankToID(i);
-    const auto& kvs = s.second;
+    auto& kvs = s.second;
+    msg.meta.addr = reinterpret_cast<uint64_t>(kvs.vals.data());
+    msg.meta.val_len = kvs.vals.size();
+    if (!msg.meta.push) kvs.vals.clear();
     if (kvs.keys.size()) {
       msg.AddData(kvs.keys);
       msg.AddData(kvs.vals);
@@ -546,7 +557,6 @@ void KVWorker<Val>::Send(int timestamp, bool push, int cmd, const KVPairs<Val>& 
         msg.AddData(kvs.lens);
       }
     }
-    msg.meta.addr = reinterpret_cast<uint64_t>(kvs.vals.data());
     Postoffice::Get()->van()->Send(msg);
   }
 }
