@@ -82,7 +82,7 @@ class KVWorker : public SimpleApp {
     using namespace std::placeholders;
     slicer_ = std::bind(&KVWorker<Val>::DefaultSlicer, this, _1, _2, _3);
     obj_ = new Customer(app_id, customer_id, std::bind(&KVWorker<Val>::Process, this, _1));
-    
+
     auto val = Environment::Get()->find("DMLC_ENABLE_RDMA");
     is_worker_zpull_ = val ? atoi(val) : false;
     if (is_worker_zpull_) PS_VLOG(1) << "Enable worker zero-copy pull";
@@ -633,10 +633,10 @@ int KVWorker<Val>::Pull_(
       if (vals->empty()) {
         vals->resize(total_val);
       } else {
-        CHECK_EQ(vals->size(), total_val);
+        CHECK_GE(vals->size(), total_val);
       }
 
-      if (!is_worker_zpull_) { // otherwise do nothing 
+      if (!is_worker_zpull_) { // otherwise do nothing
         Val* p_vals = vals->data();
         int *p_lens = nullptr;
         if (lens) {
@@ -663,7 +663,7 @@ int KVWorker<Val>::Pull_(
       if (cb) cb();
     });
 
-  KVPairs<Val> kvs; 
+  KVPairs<Val> kvs;
   kvs.keys = keys;
   kvs.vals = *vals;
   Send(ts, false, cmd, kvs);
