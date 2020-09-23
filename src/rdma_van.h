@@ -18,6 +18,7 @@
 
 #ifdef DMLC_USE_RDMA
 
+#include <algorithm>
 #include "rdma_utils.h"
 #include "rdma_transport.h"
 
@@ -125,26 +126,39 @@ class RDMAVan : public Van {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));    
 
+    int af = PF_INET;
+    int ret = -EINVAL;
+    struct addrinfo *res;
+
     auto val = Environment::Get()->find("DMLC_NODE_HOST");
+    std::string val_str = std::string(val);
     if (val) {
-      PS_VLOG(1) << "bind to DMLC_NODE_HOST: " << std::string(val);
+      PS_VLOG(1) << "bind to DMLC_NODE_HOST: " << val_str;
+      std::size_t n = std::count(val_str.begin(), val_str.end(), ':');
+      if (n > 1) {
+        af = PF_INET6;
+      }
       addr.sin_addr.s_addr = inet_addr(val);
     } 
     
-    addr.sin_family = AF_INET;
+    // addr.sin_family = AF_INET;
+    addr.sin_family = af;
     int port = node.port;
+    addr.sin_port = htons(port);
+    ret = getaddrinfo(val_str.c_str(), std::to_string(port).c_str(), NULL, &res);
+    CHECK(ret >= 0) << "could not getaddrinfo address " << val_str << " error code " << ret;
     unsigned seed = static_cast<unsigned>(time(NULL) + port);
     for (int i = 0; i < max_retry + 1; ++i) {
-      addr.sin_port = htons(port);
-      if (rdma_bind_addr(listener_,
-                         reinterpret_cast<struct sockaddr *>(&addr)) == 0) {
+      // if (rdma_bind_addr(listener_,
+      //                    reinterpret_cast<struct sockaddr *>(&addr)) == 0) {
+      if (rdma_bind_addr(listener_, res->ai_addr) == 0) {
         break;
       }
-      if (i == max_retry) {
-        port = -1;
-      } else {
+      // if (i == max_retry) {
+      //   port = -1;
+      // } else {
         port = 10000 + rand_r(&seed) % 40000;
-      }
+      // }
     }
     CHECK(rdma_listen(listener_, kRdmaListenBacklog) == 0)
         << "Listen RDMA connection failed: " << strerror(errno);
@@ -207,11 +221,11 @@ class RDMAVan : public Van {
           CHECK_EQ(rc, 0) << "getaddrinfo failed: " << gai_strerror(rc);
 
           CHECK_EQ(rdma_resolve_addr(endpoint->cm_id, addr->ai_addr,
-                              remote_addr->ai_addr, kTimeoutms), 0)
+                              (struct sockaddr *)remote_addr->ai_addr, kTimeoutms), 0)
               << "Resolve RDMA address failed with errno: " << strerror(errno);
         } else {
           CHECK_EQ(rdma_resolve_addr(endpoint->cm_id, nullptr,
-                                     remote_addr->ai_addr, kTimeoutms),
+                                     (struct sockaddr *)remote_addr->ai_addr, kTimeoutms),
                    0)
               << "Resolve RDMA address failed with errno: " << strerror(errno);
         }
