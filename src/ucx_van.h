@@ -103,11 +103,22 @@ public:
       ep_params.err_mode        = UCP_ERR_HANDLING_MODE_PEER;
     }
 
-    ucs_status_t status = ucp_ep_create(worker_, &ep_params, &ep);
-    CHECK_STATUS(status) << "ucp_ep_create failed: " << ucs_status_string(status);
-    mu_.lock();
-    client_eps_[node.id] = ep;
-    mu_.unlock();
+    bool tmp;
+    do {
+      mu_.lock();
+      is_connected_ = true;
+      mu_.unlock();
+      ucs_status_t status = ucp_ep_create(worker_, &ep_params, &ep);
+      CHECK_STATUS(status) << "ucp_ep_create failed: " << ucs_status_string(status);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+      mu_.lock();
+      client_eps_[node.id] = ep;
+      tmp = is_connected_;
+      mu_.unlock();
+      if (!tmp) {
+        UCX_LOGE(1, "ep create to node id " <<  ep << "|" << node.id);
+      }
+    } while (is_connected_ == false);
 
     UCX_LOGE(1, "ep create to node id " <<  ep << "|" << node.id);
     // Send my node id to the server ep of the peer
@@ -199,6 +210,9 @@ public:
   static void ErrorHandlerCb(void *arg, ucp_ep_h ep, ucs_status_t status)
   {
     UCXEndpointsPool *p = reinterpret_cast<UCXEndpointsPool*>(arg);
+    p->mu_.lock();
+    p->is_connected_ = false;
+    p->mu_.unlock();
     UCX_LOG_BASE(1, p->my_node_, "ERRH ep " << ep << ": " << ucs_status_string(status));
     p->ErrorHandler(ep);
   }
@@ -247,6 +261,7 @@ public:
   ucp_worker_h                      worker_;
   Node                              *my_node_;
   int                               errh_enable_;
+  bool                              is_connected_;
 };
 
 class UCXVan : public Van {
