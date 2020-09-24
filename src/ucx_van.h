@@ -103,22 +103,34 @@ public:
       ep_params.err_mode        = UCP_ERR_HANDLING_MODE_PEER;
     }
 
-    ucs_status_t status = ucp_ep_create(worker_, &ep_params, &ep);
-    CHECK_STATUS(status) << "ucp_ep_create failed: " << ucs_status_string(status);
-    mu_.lock();
-    client_eps_[node.id] = ep;
-    mu_.unlock();
+    ucs_status_t status_;
+    do {
+      ucs_status_t status = ucp_ep_create(worker_, &ep_params, &ep);
+      CHECK_STATUS(status) << "ucp_ep_create failed: " << ucs_status_string(status);
+      mu_.lock();
+      client_eps_[node.id] = ep;
+      mu_.unlock();
 
-    UCX_LOGE(1, "ep create to node id " <<  ep << "|" << node.id);
-    // Send my node id to the server ep of the peer
-    ucs_status_ptr_t req = ucp_am_send_nb(ep, UCX_AM_NODE_INFO, &my_node_->id,
-                                          sizeof(my_node_->id), ucp_dt_make_contig(1),
-                                          AmReqCompletedCb, UCP_AM_SEND_REPLY);
-    if (UCS_PTR_IS_PTR(req)) {
-      ucp_request_free(req);
-    } else {
-      CHECK(!UCS_PTR_IS_ERR(req)) << "failed to send node info";
-    }
+      UCX_LOGE(1, "ep create to node id " <<  ep << "|" << node.id);
+      // Send my node id to the server ep of the peer
+      ucs_status_ptr_t req = ucp_am_send_nb(ep, UCX_AM_NODE_INFO, &my_node_->id,
+        sizeof(my_node_->id), ucp_dt_make_contig(1),
+        AmReqCompletedCb, UCP_AM_SEND_REPLY);
+      if (req == NULL) {
+        std::cout<< "ucp_am_send_nb Active Message was sent immediately" << std::endl;
+      } else if (UCS_PTR_IS_PTR(req)) {
+        ucp_request_free(req);
+        std::cout<< "ucp_am_send_nb Active Message submitted" << std::endl;
+      } else {
+        std::cout<< "ucp_am_send_nb Active Message failed to send" << std::endl;
+        CHECK(!UCS_PTR_IS_ERR(req)) << "failed to send node info";
+      }
+      do {
+        ucp_worker_progress(worker_);
+        status_ = ucp_request_check_status(req);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      } while (status_ == UCS_INPROGRESS);
+    } while (status_ != UCS_OK);
   }
 
   void Create(ucp_conn_request_h conn_request) {
