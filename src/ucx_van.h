@@ -116,7 +116,7 @@ public:
       tmp = is_connected_;
       mu_.unlock();
       if (!tmp) {
-        UCX_LOGE(1, "ep create to node id " <<  ep << "|" << node.id);
+        UCX_LOGE(1, "ucp_ep_create() failed to connect to node id " <<  ep << "|" << node.id);
       }
     } while (is_connected_ == false);
 
