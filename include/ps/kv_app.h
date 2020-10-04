@@ -1,5 +1,6 @@
 /**
  *  Copyright (c) 2015 by Contributors
+ *  Modifications Copyright (C) Mellanox Technologies Ltd. 2020.
  */
 #ifndef PS_KV_APP_H_
 #define PS_KV_APP_H_
@@ -88,9 +89,15 @@ class KVWorker : public SimpleApp {
     using namespace std::placeholders;
     slicer_ = std::bind(&KVWorker<Val>::DefaultSlicer, this, _1, _2, _3);
     obj_ = new Customer(app_id, customer_id, std::bind(&KVWorker<Val>::Process, this, _1));
-
     auto val = Environment::Get()->find("DMLC_ENABLE_RDMA");
-    is_worker_zpull_ = val ? atoi(val) : false;
+    auto enable_ucx  = Environment::Get()->find("DMLC_ENABLE_UCX");
+    if (enable_ucx != nullptr && std::string(enable_ucx) == "1") {
+      is_worker_zpull_ = true;
+    } else if (val == nullptr || std::string(val) == "0" || std::string(val) == "zmq") {
+      is_worker_zpull_ = false;
+    } else {
+      is_worker_zpull_ = true;
+    }
     if (is_worker_zpull_) PS_VLOG(1) << "Enable worker zero-copy pull";
   }
 
