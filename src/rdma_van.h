@@ -126,7 +126,7 @@ class RDMAVan : public Van {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));    
 
-    int af = PF_INET;
+    int af = AF_INET;
     int ret = -EINVAL;
     struct addrinfo *res;
 
@@ -136,7 +136,7 @@ class RDMAVan : public Van {
       PS_VLOG(1) << "bind to DMLC_NODE_HOST: " << val_str;
       std::size_t n = std::count(val_str.begin(), val_str.end(), ':');
       if (n > 1) {
-        af = PF_INET6;
+        af = AF_INET6;
       }
       addr.sin_addr.s_addr = inet_addr(val);
     } 
@@ -154,11 +154,11 @@ class RDMAVan : public Van {
       if (rdma_bind_addr(listener_, res->ai_addr) == 0) {
         break;
       }
-      // if (i == max_retry) {
-      //   port = -1;
-      // } else {
+      if (i == max_retry) {
+        port = -1;
+      } else {
         port = 10000 + rand_r(&seed) % 40000;
-      // }
+      }
     }
     CHECK(rdma_listen(listener_, kRdmaListenBacklog) == 0)
         << "Listen RDMA connection failed: " << strerror(errno);
