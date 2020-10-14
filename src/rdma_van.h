@@ -126,7 +126,7 @@ class RDMAVan : public Van {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));    
 
-    int af = AF_INET;
+    int af = PF_INET;
     int ret = -EINVAL;
     struct addrinfo *res;
 
@@ -136,7 +136,7 @@ class RDMAVan : public Van {
       PS_VLOG(1) << "bind to DMLC_NODE_HOST: " << val_str;
       std::size_t n = std::count(val_str.begin(), val_str.end(), ':');
       if (n > 1) {
-        af = AF_INET6;
+        af = PF_INET6;
       }
       addr.sin_addr.s_addr = inet_addr(val);
     } 
