@@ -5,6 +5,7 @@
 #define PS_ZMQ_VAN_H_
 #include <stdio.h>
 #include <cstdlib>
+#include <algorithm>
 #include <zmq.h>
 #include <string>
 #include <cstring>
@@ -98,15 +99,21 @@ class ZMQVan : public Van {
   int Bind(const Node& node, int max_retry) override {
     receiver_ = zmq_socket(context_, ZMQ_ROUTER);
     int option = 1;
+    std::string hostname = node.hostname.empty() ? "*" : node.hostname;
+    size_t n = std::count(hostname.begin(), hostname.end(), ':');
     CHECK(!zmq_setsockopt(receiver_, ZMQ_ROUTER_MANDATORY, &option, sizeof(option)))
         << zmq_strerror(errno);
     CHECK(receiver_ != NULL)
         << "create receiver socket failed: " << zmq_strerror(errno);
     int local = GetEnv("DMLC_LOCAL", 0);
-    std::string hostname = node.hostname.empty() ? "*" : node.hostname;
     int use_kubernetes = GetEnv("DMLC_USE_KUBERNETES", 0);
     if (use_kubernetes > 0 && node.role == Node::SCHEDULER) {
-      hostname = "0.0.0.0";
+      hostname = (n > 1) ? "::/0" : "0.0.0.0";
+    }
+    if (n > 1) {
+      CHECK(!zmq_setsockopt(receiver_, ZMQ_IPV6, &option, sizeof(option)))
+        << zmq_strerror(errno);
+      PS_VLOG(1) << "bind IPv6 socket to host " << hostname;
     }
     std::string addr = local ? "ipc:///tmp/" : "tcp://" + hostname + ":";
     int port = node.port;
@@ -117,9 +124,9 @@ class ZMQVan : public Van {
       if (ret == 0) break;
       if (i == max_retry) {
         port = -1;
-	int zmq_err = zmq_errno();
-	LOG(FATAL) << "Reached max retry for bind: " << zmq_strerror(zmq_err)
-		   << ". errno = " << zmq_err;
+        int zmq_err = zmq_errno();
+        LOG(FATAL) << "Reached max retry for bind: " << zmq_strerror(zmq_err)
+            << ". errno = " << zmq_err;
       } else {
         port = 10000 + rand_r(&seed) % 40000;
       }
@@ -137,6 +144,7 @@ class ZMQVan : public Van {
     CHECK_NE(node.port, node.kEmpty);
     CHECK(node.hostname.size());
     int id = node.id;
+    bool is_ipv6 = false;
     mu_.lock();
     auto it = senders_.find(id);
     if (it != senders_.end()) {
@@ -155,6 +163,16 @@ class ZMQVan : public Van {
         << zmq_strerror(errno)
         << ". it often can be solved by \"sudo ulimit -n 65536\""
         << " or edit /etc/security/limits.conf";
+    std::string hostname = node.hostname.empty() ? "*" : node.hostname;
+    size_t n = std::count(hostname.begin(), hostname.end(), ':');
+    PS_VLOG(1) << "connect to host " << hostname;
+    if (n > 1) {
+      int option = 1;
+      is_ipv6 = true;
+      PS_VLOG(1) << "connect with ipv6 socket";
+      CHECK(!zmq_setsockopt(sender, ZMQ_IPV6, &option, sizeof(option)))
+        << zmq_strerror(errno);
+    }
     if (my_node_.id != Node::kEmpty) {
       std::string my_id = "ps" + std::to_string(my_node_.id);
       zmq_setsockopt(sender, ZMQ_IDENTITY, my_id.data(), my_id.size());
