@@ -113,7 +113,7 @@ class ZMQVan : public Van {
     if (n > 1) {
       CHECK(!zmq_setsockopt(receiver_, ZMQ_IPV6, &option, sizeof(option)))
         << zmq_strerror(errno);
-      PS_VLOG(1) << "bind with ipv6 socket with host " << hostname;
+      PS_VLOG(1) << "bind IPv6 socket to host " << hostname;
     }
     std::string addr = local ? "ipc:///tmp/" : "tcp://" + hostname + ":";
     int port = node.port;
