@@ -239,6 +239,7 @@ public:
       auto server_check = [ep](const auto &mo) {return mo->ep == ep;};
       auto server_it    = std::find_if(server_eps_.begin(), server_eps_.end(),
                                        server_check);
+      assert(server_it != server_eps_.end());
       server_eps_.erase(server_it);
       UCX_LOGE(1, "ep close errh: " << ep);
     }
