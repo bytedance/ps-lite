@@ -754,6 +754,8 @@ class UCXVan : public Van {
   }
 
   ucp_tag_t MakeTag(int node_id, ucp_tag_t tag) {
+    ucp_tag_t ret = 0;
+
     if (tag == UCX_TAG_DATA) {
       /* set 31-th bit */
       ret = ((ucp_tag_t)node_id) | (1UL << 31);
@@ -761,7 +763,8 @@ class UCXVan : public Van {
       /* clear 31-th bit */
       ret = ((ucp_tag_t)node_id) & ~(1UL << 31);
     } else {
-      UCX_LOGE(1, "Invalid message type" << tag);
+      /* invalid tag */
+      assert(0);
     }
     return ret << 32;
   }
