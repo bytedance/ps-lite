@@ -101,7 +101,7 @@ public:
       return;
     }
 
-    UCX_LOGE(1, "ep create TO: id" << node.id << " hn " << node.hostname <<
+    UCX_LOGE(1, "ep create TO: id " << node.id << " hn " << node.hostname <<
              " port " << node.port);
 
     struct addrinfo *remote_addr;
@@ -482,7 +482,7 @@ class UCXVan : public Van {
     CHECK(IsDataMsg(msg));
 
     ucp_tag_t tag       = MakeTag(my_node_.id, UCX_TAG_DATA);
-    tag = tag | (msg.meta.key && 0xFFFFFFFF);
+    tag                 = tag | (msg.meta.key & 0xFFFFFFFF);
     ucs_status_ptr_t st = ucp_tag_send_nb(ep, msg.data[1].data(),
                                           msg.data[1].size(), ucp_dt_make_contig(1),
                                           tag, TxReqCompletedCb);
@@ -592,9 +592,10 @@ class UCXVan : public Van {
       }
 
       do {
-        // Match only 32 bits of tag. Higher bits of tag carry sender id
-        msg = ucp_tag_probe_nb(worker_, UCX_TAG_META,
-                               std::numeric_limits<uint32_t>::max(), 1, &info);
+        /* Only match the highest bit of tag. */
+        ucp_tag_t tag = 0;
+        ucp_tag_t tag_mask = 1UL << 63;
+        msg = ucp_tag_probe_nb(worker_, tag, tag_mask, 1, &info);
         if (msg != NULL) {
           // Some meta data is ready, post a receive to get it
           UCXRequest *meta_req = PostRecvMeta(msg, &info);
@@ -641,6 +642,7 @@ class UCXVan : public Van {
     }
 
     ucp_tag_t tag       = MakeTag(my_node_.id, UCX_TAG_META);
+    tag                 = tag | (msg.meta.key & 0xFFFFFFFF);
     ucs_status_ptr_t st = ucp_tag_send_nb(ep, buf, count, dt, tag, TxReqCompletedCb);
     if (UCS_PTR_IS_PTR(st)) {
       UCXRequest *req    = reinterpret_cast<UCXRequest*>(st);
@@ -673,7 +675,7 @@ class UCXVan : public Van {
       // Add sender id to the tag to ensure message received from the proper node
       char *buf       = GetRxBuffer(meta->key, val_len, meta->push);
       ucp_tag_t tag   = MakeTag(meta_req->data.sender, UCX_TAG_DATA);
-      tag = tag | (meta->key & 0xFFFFFFFF);
+      tag             = tag | (meta->key & 0xFFFFFFFF);
       UCXRequest *req = (UCXRequest*)ucp_tag_recv_nb(worker_, buf, val_len,
                                                      ucp_dt_make_contig(1), tag,
                                                      std::numeric_limits<uint64_t>::max(),
@@ -766,11 +768,14 @@ class UCXVan : public Van {
       /* invalid tag */
       assert(0);
     }
+
     return ret << 32;
   }
 
   int NodeIdFromTag(ucp_tag_t tag) {
-    return (int)(tag >> 32);
+    tag = tag >> 32;
+    tag &= ~(1UL << 31);
+    return (int)tag;
   }
 
   static void RequestInit(void *request) {
