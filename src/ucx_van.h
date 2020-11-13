@@ -769,8 +769,7 @@ class UCXVan : public Van {
 
     ret = (ucp_tag_t)node_id << 32;
     ret &= ~static_cast<uint64_t>(Tags::UCX_TAG_MASK);
-    ret &= (static_cast<uint64_t>(tag) |
-           ~static_cast<uint64_t>(Tags::UCX_TAG_MASK));
+    ret |= static_cast<uint64_t>(tag);
     ret |= (key & 0xFFFFFFFF);
 
     return ret;
