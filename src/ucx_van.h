@@ -481,8 +481,7 @@ class UCXVan : public Van {
 
     CHECK(IsDataMsg(msg));
 
-    ucp_tag_t tag       = MakeTag(my_node_.id, UCX_TAG_DATA);
-    tag                 = tag | (msg.meta.key & 0xFFFFFFFF);
+    ucp_tag_t tag       = MakeTag(my_node_.id, Tags::UCX_TAG_DATA, msg.meta.key);
     ucs_status_ptr_t st = ucp_tag_send_nb(ep, msg.data[1].data(),
                                           msg.data[1].size(), ucp_dt_make_contig(1),
                                           tag, TxReqCompletedCb);
@@ -539,7 +538,11 @@ class UCXVan : public Van {
   }
 
  private:
-  enum Tags { UCX_TAG_META = 0, UCX_TAG_DATA };
+  enum class Tags : uint64_t {
+    UCX_TAG_META = 0,
+    UCX_TAG_DATA = 1ULL << 63,
+    UCX_TAG_MASK = 1ULL << 63
+  };
 
   bool IsDataMsg(Message &msg) {
     return IsValidPushpull(msg) &&
@@ -593,9 +596,10 @@ class UCXVan : public Van {
 
       do {
         /* Only match the highest bit of tag. */
-        ucp_tag_t tag = 0;
-        ucp_tag_t tag_mask = 1UL << 63;
-        msg = ucp_tag_probe_nb(worker_, tag, tag_mask, 1, &info);
+        msg = ucp_tag_probe_nb(worker_,
+                               static_cast<ucp_tag_t>(Tags::UCX_TAG_META),
+                               static_cast<ucp_tag_t>(Tags::UCX_TAG_MASK),
+                               1, &info);
         if (msg != NULL) {
           // Some meta data is ready, post a receive to get it
           UCXRequest *meta_req = PostRecvMeta(msg, &info);
@@ -641,8 +645,7 @@ class UCXVan : public Van {
       UCX_LOG(2, "sending meta to ep(" << msg.meta.recver << ") " << ep);
     }
 
-    ucp_tag_t tag       = MakeTag(my_node_.id, UCX_TAG_META);
-    tag                 = tag | (msg.meta.key & 0xFFFFFFFF);
+    ucp_tag_t tag       = MakeTag(my_node_.id, Tags::UCX_TAG_META, msg.meta.key);
     ucs_status_ptr_t st = ucp_tag_send_nb(ep, buf, count, dt, tag, TxReqCompletedCb);
     if (UCS_PTR_IS_PTR(st)) {
       UCXRequest *req    = reinterpret_cast<UCXRequest*>(st);
@@ -674,8 +677,8 @@ class UCXVan : public Van {
     } else {
       // Add sender id to the tag to ensure message received from the proper node
       char *buf       = GetRxBuffer(meta->key, val_len, meta->push);
-      ucp_tag_t tag   = MakeTag(meta_req->data.sender, UCX_TAG_DATA);
-      tag             = tag | (meta->key & 0xFFFFFFFF);
+      ucp_tag_t tag   = MakeTag(meta_req->data.sender, Tags::UCX_TAG_DATA,
+                                meta->key);
       UCXRequest *req = (UCXRequest*)ucp_tag_recv_nb(worker_, buf, val_len,
                                                      ucp_dt_make_contig(1), tag,
                                                      std::numeric_limits<uint64_t>::max(),
@@ -755,27 +758,27 @@ class UCXVan : public Van {
     UCX_REQUEST_FREE(req); // can release request back to UCX now
   }
 
-  ucp_tag_t MakeTag(int node_id, ucp_tag_t tag) {
+  /**
+   * from the left to the right:
+   * 1 bit for UCX_TAG_META/UCX_TAG_DATA
+   * 31 bits for the sender node_id
+   * 32 bits for the key
+   */
+  ucp_tag_t MakeTag(int node_id, Tags tag, uint64_t key) {
     ucp_tag_t ret = 0;
 
-    if (tag == UCX_TAG_DATA) {
-      /* set 31-th bit */
-      ret = ((ucp_tag_t)node_id) | (1UL << 31);
-    } else if (tag == UCX_TAG_META) {
-      /* clear 31-th bit */
-      ret = ((ucp_tag_t)node_id) & ~(1UL << 31);
-    } else {
-      /* invalid tag */
-      assert(0);
-    }
+    ret = (ucp_tag_t)node_id << 32;
+    ret &= ~static_cast<uint64_t>(Tags::UCX_TAG_MASK);
+    ret &= (static_cast<uint64_t>(tag) |
+           ~static_cast<uint64_t>(Tags::UCX_TAG_MASK));
+    ret |= (key & 0xFFFFFFFF);
 
-    return ret << 32;
+    return ret;
   }
 
   int NodeIdFromTag(ucp_tag_t tag) {
-    tag = tag >> 32;
-    tag &= ~(1UL << 31);
-    return (int)tag;
+    tag &= ~static_cast<uint64_t>(Tags::UCX_TAG_MASK);
+    return (int)(tag >> 32);
   }
 
   static void RequestInit(void *request) {
