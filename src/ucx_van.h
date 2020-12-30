@@ -209,8 +209,12 @@ public:
     void *req = ucp_ep_close_nb(ep, UCP_EP_CLOSE_MODE_FLUSH);
     if (UCS_PTR_IS_PTR(req)) {
       close_ep_reqs_.push(req);
-    } else if (UCS_PTR_STATUS(req) != UCS_OK) {
-      LOG(ERROR) << "failed to close ep: " << ep;
+    } else {
+      ucs_status_t status = UCS_PTR_STATUS(req);
+      if ((status != UCS_OK) && (status != UCS_ERR_ENDPOINT_TIMEOUT)) {
+        LOG(ERROR) << "failed to close ep: " << ep << "("
+                   << ucs_status_string(status) << ")";
+      }
     }
 
     UCX_LOGE(2, "close ep " << ep << " with req " << req);
@@ -239,8 +243,10 @@ public:
       auto server_check = [ep](const auto &mo) {return mo->ep == ep;};
       auto server_it    = std::find_if(server_eps_.begin(), server_eps_.end(),
                                        server_check);
-      assert(server_it != server_eps_.end());
-      server_eps_.erase(server_it);
+      // ep may not be present in the set if ep id is not arrived yet (see AmRxNodeInfoReq)
+      if (server_it != server_eps_.end()) {
+        server_eps_.erase(server_it);
+      }
       UCX_LOGE(1, "ep close errh: " << ep);
     }
     mu_.unlock();
