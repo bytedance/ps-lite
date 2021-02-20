@@ -809,8 +809,7 @@ class UCXVan : public Van {
     PS_VLOG(1) << " num_cpu_dev "
       << num_cpu_dev << " num_gpu_dev " << num_gpu_dev
       << " node.num_ports " << node.num_ports;
-    // TODO: assume only one type of device for now, change it later.
-    CHECK(num_cpu_dev == 0 || num_gpu_dev == 0);
+
     std::vector<std::pair<int, int>> devs;
     for (int i = 0; i < num_cpu_dev; ++i) {
       devs.push_back(std::make_pair(CPU, i));
