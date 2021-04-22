@@ -40,8 +40,8 @@ export DMLC_ENABLE_UCX=1          # test ucx
 # export UCX_TLS=all                # not working
 # export UCX_TLS=ib,tcp           # working
 #export UCX_TLS=ib,tcp,cuda_ipc,cuda_copy
-export UCX_TLS=ib,cuda_ipc,cuda_copy
-export UCX_MEMTYPE_CACHE=n
+#export UCX_TLS=ib,cuda_ipc,cuda_copy
+# export UCX_MEMTYPE_CACHE=n
 #export UCX_RNDV_SCHEME=put_zcopy
 export BYTEPS_UCX_SHORT_THRESH=0
 
@@ -61,7 +61,7 @@ export UCX_IB_NUM_PATHS=1
 export UCX_IB_TRAFFIC_CLASS=236
 # export UCX_NET_DEVICES=mlx5_2:1,mlx5_3:1
 export UCX_IB_GID_INDEX=3
-export UCX_IB_IS_GLOBAL=y
+#export UCX_IB_IS_GLOBAL=y
 
 export BYTEPS_ENABLE_IPC=0
 
