@@ -1024,8 +1024,11 @@ class UCXVan : public Van {
     size_t count;
     ucp_datatype_t dt;
 
-    if (IsDataMsg(msg) && (msg.meta.val_len <= short_send_thresh_)) {
-      // Bundle data with meta, save meta length in option (for parsing on Server)
+    if (IsDataMsg(msg) && (msg.meta.src_dev_type == CPU) &&
+        (msg.meta.val_len <= short_send_thresh_)) {
+      // Bundle data with meta, save meta length in option (for parsing on Server).
+      // Note that only CPU data can be bundled with meta, because UCX does not yet
+      // support iov types for GPU memory.
       msg.meta.option   = GetPackMetaLen(msg.meta);
       meta_buf          = new char[msg.meta.option + sizeof(ucp_dt_iov_t)*2];
       PackMeta(msg.meta, &meta_buf, &meta_size);
