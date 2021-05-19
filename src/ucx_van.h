@@ -147,7 +147,7 @@ public:
     UCXEp *ucx_ep;
 
     for (int i = 0; i < node.num_ports; ++i) {
-      UCX_LOGE(1, "ep create TO: id " << node.id << ", hn " << node.hostname <<
+      UCX_LOGE(3, "ep create TO: id " << node.id << ", hn " << node.hostname <<
                ", port " << node.ports[i] << ", device id " << node.dev_ids[i]);
 
       struct addrinfo *remote_addr;
@@ -174,7 +174,7 @@ public:
       }
     }
 
-    UCX_LOGE(1, "ep create: connected to all ports of " << node.id);
+    UCX_LOGE(3, "ep create: connected to all ports of " << node.id);
   }
 
   void Create(UCXEp *ucx_ep) {
@@ -198,7 +198,7 @@ public:
     ucs_status_t status = ucp_ep_create(tx_worker_, &ep_params, &ucx_ep->ep);
     CHECK_STATUS(status) << "ucp_ep_create failed: " << ucs_status_string(status);
 
-    UCX_LOGE(1, "ep created " << ucx_ep->ep << " id: " << ucx_ep->id);
+    UCX_LOGE(3, "ep created " << ucx_ep->ep << " id: " << ucx_ep->id);
 
     // UCX ep creation is a non-blocking routine. Exchange ep ids to ensure the
     // connection is setup and ready for use.
@@ -230,24 +230,24 @@ public:
     ucp_ep_h ep;
     ucs_status_t status = ucp_ep_create(rx_worker_, &ep_params, &ep);
     CHECK_STATUS(status) << "failed to create ep by request " << ucs_status_string(status);
-    UCX_LOGE(1, "ep created by request: " << ep);
+    UCX_LOGE(3, "ep created by request: " << ep);
     // Wait for node id to arrive in AmRxNodeInfo, then add to the server_eps set
   }
 
   void Cleanup() {
     mu_.lock();
     for (auto& it : client_eps_) {
-      UCX_LOGE(1, "ep close in cleanup: " << it.first << "|"  << it.second->ep);
+      UCX_LOGE(3, "ep close in cleanup: " << it.first << "|"  << it.second->ep);
       CloseEp(it.second->ep);
     }
 
     for (auto& it : server_eps_) {
-      UCX_LOGE(1, "ep close in cleanup: " << it->ep);
+      UCX_LOGE(3, "ep close in cleanup: " << it->ep);
       CloseEp(it->ep);
     }
     mu_.unlock();
 
-    UCX_LOGE(1, "ep close all, active reqs: " << close_ep_reqs_.size());
+    UCX_LOGE(3, "ep close all, active reqs: " << close_ep_reqs_.size());
     while (!close_ep_reqs_.empty()) {
       // There should not be concurrent access to rx_worker, because polling
       // thread is supposed to be joined already.
@@ -284,7 +284,7 @@ public:
       }
     }
 
-    UCX_LOGE(2, "close ep " << ep << " with req " << req);
+    UCX_LOGE(3, "close ep " << ep << " with req " << req);
   }
 
   void ErrorHandler(ucp_ep_h ep)
@@ -301,10 +301,10 @@ public:
         uep->ep = nullptr;
         std::this_thread::sleep_for(std::chrono::milliseconds(reconnect_tmo_));
         Create(uep);
-        UCX_LOGE(1, "ep close errh: " << ep << "|" << client_it->first
+        UCX_LOGE(3, "ep close errh: " << ep << "|" << client_it->first
                  << " Reconnect, close reqs " << close_ep_reqs_.size());
       } else {
-        UCX_LOGE(1, "ep close errh: " << ep << "|" << client_it->first
+        UCX_LOGE(3, "ep close errh: " << ep << "|" << client_it->first
                  << " peer failure");
         mu_.lock();
         client_eps_.erase(client_it);
@@ -320,7 +320,7 @@ public:
         server_eps_.erase(server_it);
       }
       mu_.unlock();
-      UCX_LOGE(1, "ep close errh: " << ep);
+      UCX_LOGE(3, "ep close errh: " << ep);
     }
     CloseEp(ep);
   }
@@ -337,7 +337,7 @@ public:
   static void ErrorHandlerCb(void *arg, ucp_ep_h ep, ucs_status_t status)
   {
     UCXEndpointsPool *p = reinterpret_cast<UCXEndpointsPool*>(arg);
-    UCX_LOG_BASE(1, p->my_node_, "ERRH ep " << ep << ": " << ucs_status_string(status));
+    UCX_LOG_BASE(3, p->my_node_, "ERRH ep " << ep << ": " << ucs_status_string(status));
     p->ErrorHandler(ep);
   }
 
@@ -354,7 +354,7 @@ public:
     UCXEndpointsPool *p = reinterpret_cast<UCXEndpointsPool*>(arg);
     uint64_t id         = *(reinterpret_cast<uint64_t*>(data));
 
-    UCX_LOG_BASE(1, p->my_node_, "ep create, got AM id " << id << " my id "
+    UCX_LOG_BASE(3, p->my_node_, "ep create, got AM id " << id << " my id "
                  << p->my_node_->id <<", save " << reply_ep);
 
     p->mu_.lock();
@@ -383,11 +383,11 @@ public:
     UCXEndpointsPool *p = reinterpret_cast<UCXEndpointsPool*>(arg);
     uint64_t id         = *(reinterpret_cast<uint64_t*>(data));
 
-    UCX_LOG_BASE(1, p->my_node_, "ep create, got AM REPLY node id " << id
+    UCX_LOG_BASE(3, p->my_node_, "ep create, got AM REPLY node id " << id
                  << " ep " << reply_ep << " eps size " << p->client_eps_.size());
     for(auto it = p->client_eps_.begin(); it != p->client_eps_.end(); ++it)
     {
-        UCX_LOG_BASE(1, p->my_node_, "Key " << it->first );
+        UCX_LOG_BASE(3, p->my_node_, "Key " << it->first );
     }
 
     p->mu_.lock();
@@ -575,7 +575,7 @@ public:
     auto val = Environment::Get()->find("DMLC_NODE_HOST");
     struct sockaddr_in addr = {};
     if (val) {
-      UCX_LOGE(1, "binding to DMLC_NODE_HOST: " << std::string(val));
+      UCX_LOGE(3, "binding to DMLC_NODE_HOST: " << std::string(val));
       addr.sin_addr.s_addr = inet_addr(val);
     } else {
       addr.sin_addr.s_addr = INADDR_ANY;
@@ -593,7 +593,7 @@ public:
     ucs_status_t status     = ucp_listener_create(rx_worker_, &params, &listener_);
     CHECK_STATUS(status) << "ucp_listener_create failed: " << ucs_status_string(status);
 
-    UCX_LOGE(1, "bound to " << addr.sin_addr.s_addr << " port: " << port);
+    UCX_LOGE(3, "bound to " << addr.sin_addr.s_addr << " port: " << port);
   }
 
   void Connect(const Node &node) {
@@ -642,7 +642,7 @@ public:
     ucp_tag_t stag = MakeTag(my_node_->id, req.tag, req.key);
     ucp_request_param_t send_param;
 
-    UCX_LOGE(2, "Send to ep " << ep  << " (" << req.rx_id << ", " << req.dst_dev_id <<")");
+    UCX_LOGE(3, "Send to ep " << ep  << " (" << req.rx_id << ", " << req.dst_dev_id <<")");
 
     if (ep == nullptr) return UCS_STATUS_PTR(UCS_ERR_NOT_CONNECTED);
 
@@ -730,12 +730,12 @@ private:
     RawMeta *meta = reinterpret_cast<RawMeta*>(meta_req->data.raw_meta);
     int val_len   = meta->val_len;
     if (meta->option == UCX_OPTION_META) {
-      UCX_LOGE(2, " rx just meta, sender " << meta_req->data.sender
+      UCX_LOGE(3, " rx just meta, sender " << meta_req->data.sender
                << " val_len: " << val_len);
       CHECK_EQ(meta_req->data.buffer, nullptr);
       rx_pool_->Push(meta_req->data);
     } else if (meta->option > 0) {
-      UCX_LOGE(2, " rx meta with data, data len: " << val_len);
+      UCX_LOGE(3, " rx meta with data, data len: " << val_len);
       meta_req->data.buffer = rx_pool_->GetRxBuffer(meta->key, meta_req->data.sender,
                                                     val_len, meta->push);
       memcpy(meta_req->data.buffer, meta_req->data.raw_meta + meta->option, val_len);
@@ -756,7 +756,7 @@ private:
       req->data.buffer      = buf;
       req->data.should_stop = false;
       req->ctx              = this;
-      UCX_LOGE(2, "rx meta, post recv for data, len " << val_len << ", tag " << tag);
+      UCX_LOGE(3, "rx meta, post recv for data, len " << val_len << ", tag " << tag);
       if (req->completed) {
         rx_pool_->Push(req->data);
         UCX_REQUEST_FREE(req);
@@ -777,7 +777,7 @@ private:
     req->data.raw_meta    = rmeta;
     req->data.sender      = NodeIdFromTag(info->sender_tag);
     req->data.should_stop = false;
-    UCX_LOGE(2, " rx meta, sender " << req->data.sender << " tag "
+    UCX_LOGE(3, " rx meta, sender " << req->data.sender << " tag "
              << info->sender_tag << " compl " << req->completed);
     return req;
   }
@@ -856,24 +856,24 @@ class UCXVan : public Van {
     short_send_thresh_   = GetEnv("BYTEPS_UCX_SHORT_THRESH", 4096);
     force_request_order_ = GetEnv("BYTEPS_UCX_FORCE_REQ_ORDER", 0);
     queue_sends_         = GetEnv("BYTEPS_UCX_QUEUE_SENDS", 1);
-    if (!getenv("UCX_USE_MT_MUTEX")) {
-      LOG(FATAL) << "UCX_USE_MT_MUTEX is not set. Please export UCX_USE_MT_MUTEX=y";
+    if (!getenv("UCX_USE_MT_MUTEX") && !getenv("PSLITE_UCX_USE_MT_MUTEX")) {
+      LOG(FATAL) << "PSLITE_UCX_USE_MT_MUTEX is not set. Please export PSLITE_UCX_USE_MT_MUTEX=y";
     }
-    if (!getenv("UCX_SOCKADDR_CM_ENABLE")) {
-      LOG(FATAL) << "UCX_SOCKADDR_CM_ENABLE is not set. Please export UCX_SOCKADDR_CM_ENABLE=y";
+    if (!getenv("UCX_SOCKADDR_CM_ENABLE") && !getenv("PSLITE_UCX_SOCKADDR_CM_ENABLE")) {
+      LOG(FATAL) << "PSLITE_UCX_SOCKADDR_CM_ENABLE is not set. Please export PSLITE_UCX_SOCKADDR_CM_ENABLE=y";
     }
-    if (!getenv("UCX_RNDV_THRESH")) {
-      LOG(WARNING) << "UCX_RNDV_THRESH is not set. We recommend export UCX_RNDV_THRESH=8k";
+    if (!getenv("UCX_RNDV_THRESH") && !getenv("PSLITE_UCX_RNDV_THRESH")) {
+      LOG(WARNING) << "PSLITE_UCX_RNDV_THRESH is not set. We recommend export PSLITE_UCX_RNDV_THRESH=8k";
     }
-    if (!getenv("UCX_IB_TRAFFIC_CLASS")) {
-      LOG(WARNING) << "UCX_IB_TRAFFIC_CLASS is not set. RDMA traffic class may be incorrect";
+    if (!getenv("UCX_IB_TRAFFIC_CLASS") && !getenv("PSLITE_UCX_IB_TRAFFIC_CLASS")) {
+      LOG(WARNING) << "PSLITE_UCX_IB_TRAFFIC_CLASS is not set. RDMA traffic class may be incorrect";
     }
   }
 
   Postoffice* postoffice_;
 
   ~UCXVan() {
-    LOG(INFO) << "~UCXVan";
+    PS_VLOG(1) << "~UCXVan";
   }
 
   virtual std::string GetType() const {
@@ -920,9 +920,8 @@ class UCXVan : public Van {
     int num_gpu_dev   = GetEnv("DMLC_NUM_GPU_DEV", 0);
 
     // CHECK_EQ(num_cpu_dev + num_gpu_dev, node.num_ports);
-    PS_VLOG(1) << " num_cpu_dev "
-      << num_cpu_dev << " num_gpu_dev " << num_gpu_dev
-      << " node.num_ports " << node.num_ports;
+    PS_VLOG(1) << "num_cpu_dev=" << num_cpu_dev << " num_gpu_dev=" << num_gpu_dev
+      << " node.num_ports=" << node.num_ports;
 
     std::vector<std::pair<int, int>> devs;
     for (int i = 0; i < num_cpu_dev; ++i) {
@@ -1041,7 +1040,7 @@ class UCXVan : public Van {
         LOG(ERROR) << "failed to send data: " << ucs_status_string(UCS_PTR_STATUS(st));
         return -1;
       }
-      UCX_LOG(2, "send data, len: " << msg.data[1].size() << ", to id " << id);
+      UCX_LOG(3, "send data, len: " << msg.data[1].size() << ", to id " << id);
     }
 
     return len + msg.meta.data_size;
@@ -1066,7 +1065,7 @@ class UCXVan : public Van {
       req.buf           = iov;
       req.count         = 2;
       req.dt            = ucp_dt_make_iov();
-      UCX_LOG(2, "sending meta to id(" << msg.meta.recver << ") with data: "
+      UCX_LOG(3, "sending meta to id(" << msg.meta.recver << ") with data: "
               << msg.meta.val_len);
     } else {
       PackMeta(msg.meta, &meta_buf, &meta_size);
@@ -1074,7 +1073,7 @@ class UCXVan : public Van {
       req.buf   = meta_buf;
       req.count = meta_size;
       data_size = 0;
-      UCX_LOG(2, "sending meta to id(" << msg.meta.recver << "), src dev id "
+      UCX_LOG(3, "sending meta to id(" << msg.meta.recver << "), src dev id "
               << src_dev_id);
     }
 
@@ -1190,10 +1189,8 @@ class UCXVan : public Van {
             break;
           }
         }
-        if (count > 0) PS_VLOG(4) << "out-of-order count = " << count;
         next_recv_sids_[sender] = next_sid;
       } else {
-        PS_VLOG(4) << "out-of-order msg arrived. sid=" << sid;
         buffs[sid] = buf;
       }
     }
