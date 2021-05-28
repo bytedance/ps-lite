@@ -855,7 +855,7 @@ class UCXVan : public Van {
   UCXVan(Postoffice* postoffice) : Van(postoffice), postoffice_(postoffice) {
     short_send_thresh_   = GetEnv("BYTEPS_UCX_SHORT_THRESH", 4096);
     force_request_order_ = GetEnv("BYTEPS_UCX_FORCE_REQ_ORDER", 0);
-    queue_sends_         = GetEnv("BYTEPS_UCX_QUEUE_SENDS", 1);
+    queue_sends_         = GetEnv("BYTEPS_UCX_QUEUE_SENDS", 0);
     if (!getenv("UCX_USE_MT_MUTEX") && !getenv("PSLITE_UCX_USE_MT_MUTEX")) {
       LOG(FATAL) << "PSLITE_UCX_USE_MT_MUTEX is not set. Please export PSLITE_UCX_USE_MT_MUTEX=y";
     }
