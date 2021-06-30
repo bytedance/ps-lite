@@ -55,6 +55,8 @@ std::mutex g_log_mutex;
     ucp_request_free(_req); \
   } while(0)
 
+#define UCX_VALID_KEY_BITS 50
+
 enum class Tags : uint64_t {
   UCX_TAG_META = 0,
   UCX_TAG_DATA = 1ULL << 63,
@@ -728,24 +730,24 @@ private:
   /**
    * from the left to the right:
    * 1 bit for UCX_TAG_META/UCX_TAG_DATA
-   * 15 bits for the sender node_id
-   * 48 bits for the key
+   * 13 bits for the sender node_id
+   * 50 bits for the key
    */
   ucp_tag_t MakeTag(int node_id, Tags tag, uint64_t key) {
     ucp_tag_t ret = 0;
 
-    assert(((ucp_tag_t)node_id & 0xFFFFFFFFFFFF8000) == 0);
-    ret = (ucp_tag_t)node_id << 48;
+    assert(((ucp_tag_t)node_id & 0xFFFFFFFFFFFFe000) == 0);
+    ret = (ucp_tag_t)node_id << UCX_VALID_KEY_BITS;
     ret &= ~static_cast<uint64_t>(Tags::UCX_TAG_MASK);
     ret |= static_cast<uint64_t>(tag);
-    ret |= (key & 0xFFFFFFFFFFFF);
+    ret |= (key & 0x3FFFFFFFFFFFF);
 
     return ret;
   }
 
   int NodeIdFromTag(ucp_tag_t tag) {
     tag &= ~static_cast<uint64_t>(Tags::UCX_TAG_MASK);
-    return (int)(tag >> 48);
+    return (int)(tag >> UCX_VALID_KEY_BITS);
   }
 
   void PostRecvData(UCXRequest *meta_req) {
